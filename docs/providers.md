@@ -20,6 +20,9 @@ Provider names today:
 - `opencode`: shells out to `opencode run --format json`
 - `pi`: shells out to `pi -p` (non-interactive print mode)
 - `cursor`: shells out to `cursor-agent -p --output-format json`
+- `gateway`: HTTP POST to any OpenAI-compatible `/chat/completions` endpoint
+  with structured outputs — no CLI dependency. **Added in the protoLabs fork
+  (`@protolabsai/protopatch`).** See [Gateway](#gateway) below.
 - `mock`: deterministic provider for tests and fixtures
 - `mock-fail`: failure provider for tests
 
@@ -317,7 +320,72 @@ uses `--force` or `--yolo`. Complete HITL verification before promoting this to
 default provider support, especially for ambient rules, MCP configuration,
 temporary prompt file handling, timeout behavior, and any claimed read-only mode.
 
-Direct OpenAI API, local-model, and multi-model panel providers are not
-implemented yet. The `acpx` provider is the generic route for ACP-compatible
-agents; the `grok`, `opencode`, `pi`, and `cursor` providers are direct integrations
-for local CLIs.
+## Gateway
+
+> Added in the protoLabs fork (`@protolabsai/protopatch`, 0.5.0). Not present
+> in upstream `openclaw/clawpatch`.
+
+POSTs the already-assembled prompt to any **OpenAI-compatible
+`/chat/completions` endpoint** with structured outputs
+(`response_format: json_schema`). No CLI subprocess, no auth handshake — just
+a Bearer token and a URL. The provider's `check()` validates env without
+making a network call so `clawpatch doctor` won't spend tokens on a probe.
+
+Designed for the protoLabs LiteLLM gateway:
+
+- inside the docker network: `http://gateway:4000/v1`
+- externally: `https://api.proto-labs.ai/v1`
+
+…but works against anything that speaks the OpenAI Chat Completions API:
+vanilla OpenAI, vLLM, LM Studio, Ollama with the OpenAI shim, etc.
+
+### When to use it
+
+Pick `gateway` over `claude` / `codex` / `acpx` when:
+
+- You are running clawpatch inside a container or CI runner where installing
+  + OAuth-ing a per-agent CLI is impractical.
+- You already have an OpenAI-compatible LLM endpoint and want a uniform
+  provider abstraction across multiple tools.
+- You want a provider that fails fast on auth and reports HTTP errors
+  verbatim instead of parsing a CLI's stdout envelope.
+
+### Configuration
+
+```bash
+clawpatch review --provider gateway --model protolabs/smart
+```
+
+Or set the provider once in `.clawpatch/config.json`:
+
+```json
+{
+  "provider": { "name": "gateway", "model": "protolabs/smart" }
+}
+```
+
+### Environment
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY` | required | Bearer token. The gateway provider refuses to start without one. |
+| `OPENAI_BASE_URL` | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped. |
+| `CLAWPATCH_GATEWAY_MODEL` | `protolabs/smart` | `--model` on the CLI overrides. |
+| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
+| `--reasoning-effort none|minimal|low|medium|high|xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
+
+### Why this can be the minimal provider
+
+The `buildReviewPrompt` / `buildMapPrompt` / `buildFixPrompt` helpers already
+inline the relevant file contents as `Files:` blocks in the prompt body. The
+gateway provider therefore needs zero file IO — it's effectively the smallest
+possible provider implementation: prompt in, JSON out. All schema enforcement
+happens via the same `response_format: json_schema` contract every other
+provider already negotiates.
+
+---
+
+Direct OpenAI API, local-model, and multi-model panel providers (other than
+`gateway`) are not implemented yet. The `acpx` provider is the generic route
+for ACP-compatible agents; the `grok`, `opencode`, `pi`, and `cursor`
+providers are direct integrations for local CLIs.

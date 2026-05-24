@@ -1,4 +1,11 @@
-# 🩹 clawpatch
+# 🩹 clawpatch — protoLabs fork
+
+> This is a protoLabs-maintained fork of [`openclaw/clawpatch`](https://github.com/openclaw/clawpatch).
+> We took ownership 2026-05-24 to land features we needed without waiting on
+> upstream, principally a **`gateway` provider** that talks to any OpenAI-
+> compatible HTTP endpoint instead of shelling out to a CLI agent. See
+> [`docs/providers.md`](docs/providers.md#gateway) for details.
+> Source: [`protoLabsAI/protoPatch`](https://github.com/protoLabsAI/protoPatch).
 
 Automated code review that lands fixes.
 
@@ -12,6 +19,20 @@ resulting worktree changes.
 
 ## Install
 
+From npm (this fork, includes the `gateway` provider):
+
+```bash
+pnpm add -g @protolabsai/protopatch
+```
+
+Or directly from the repo (tracks `main`):
+
+```bash
+pnpm add -g github:protoLabsAI/protoPatch
+```
+
+Upstream `openclaw/clawpatch` (no `gateway` provider) is unaffected:
+
 ```bash
 pnpm add -g clawpatch
 ```
@@ -23,6 +44,9 @@ pnpm install
 pnpm build
 pnpm link --global
 ```
+
+Both `clawpatch` and `protopatch` are installed as CLI binaries — they point
+at the same entry. Use whichever fits.
 
 ## Workflow
 

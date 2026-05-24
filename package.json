@@ -1,15 +1,28 @@
 {
-  "name": "clawpatch",
-  "version": "0.4.0",
-  "description": "Automated code review that lands fixes.",
+  "name": "@protolabsai/protopatch",
+  "version": "0.5.0",
+  "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/protoLabsAI/protoPatch.git"
+  },
+  "homepage": "https://github.com/protoLabsAI/protoPatch#readme",
+  "bugs": {
+    "url": "https://github.com/protoLabsAI/protoPatch/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
-    "clawpatch": "dist/cli.js"
+    "clawpatch": "dist/cli.js",
+    "protopatch": "dist/cli.js"
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "scripts": {

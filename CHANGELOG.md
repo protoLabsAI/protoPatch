@@ -1,5 +1,32 @@
 # Changelog
 
+## Fork notice — 2026-05-24
+
+This repository is now `protoLabsAI/protoPatch`, a protoLabs-maintained fork
+of `openclaw/clawpatch`. The version stream is renumbered (`0.5.0` and on)
+to make our releases unambiguous against upstream. The CLI binary stays as
+`clawpatch` for downstream compatibility; `protopatch` is also installed as
+an alias for explicitness.
+
+## 0.5.0 - Unreleased (protoLabs fork)
+
+- **fork**: protoLabs took ownership 2026-05-24. Package renamed to
+  `@protolabsai/protopatch` on npm. Install via
+  `pnpm add -g @protolabsai/protopatch` (or
+  `pnpm add -g github:protoLabsAI/protoPatch` direct from this repo).
+- **provider**: added `gateway` — POSTs the assembled prompt to any
+  OpenAI-compatible `/chat/completions` endpoint with structured outputs
+  (`response_format: json_schema`). No CLI subprocess; no auth handshake.
+  Designed for the protoLabs LiteLLM gateway but works against any
+  OpenAI-compatible server (vanilla OpenAI, vLLM, LM Studio, Ollama with the
+  OpenAI shim). Env: `GATEWAY_API_KEY` (or `OPENAI_API_KEY`), `OPENAI_BASE_URL`
+  (default `https://api.proto-labs.ai/v1`), `CLAWPATCH_GATEWAY_MODEL`
+  (default `protolabs/smart`), `CLAWPATCH_GATEWAY_TIMEOUT_MS` (default 300000).
+  See [`docs/providers.md`](docs/providers.md#gateway).
+- **bin**: `protopatch` added as an alias alongside `clawpatch` — both
+  resolve to the same CLI entry. Useful when the upstream `clawpatch` is
+  also on PATH (e.g., during the migration window).
+
 ## 0.4.1 - Unreleased
 
 ## 0.4.0 - 2026-05-22
