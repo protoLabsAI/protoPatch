@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ClawpatchError } from "./errors.js";
 import { __testing, extractJson, providerByName } from "./provider.js";
 import { safeProviderPreview } from "./provider-json.js";
@@ -1645,10 +1645,137 @@ describe("providerByName", () => {
     expect(providerByName("cursor").name).toBe("cursor");
   });
 
+  it("returns the gateway provider for HTTP-based reviews", () => {
+    expect(providerByName("gateway").name).toBe("gateway");
+  });
+
   it("still supports codex, mock, and mock-fail", () => {
     expect(providerByName("codex").name).toBe("codex");
     expect(providerByName("mock").name).toBe("mock");
     expect(providerByName("mock-fail").name).toBe("mock-fail");
+  });
+});
+
+describe("gateway provider config", () => {
+  const ENV_KEYS = [
+    "GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAWPATCH_GATEWAY_MODEL",
+    "CLAWPATCH_GATEWAY_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) snapshot[k] = process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  it("throws ClawpatchError(provider-auth) when no API key is set", () => {
+    expect(() =>
+      // eslint-disable-next-line no-underscore-dangle
+      __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }),
+    ).toThrowError(ClawpatchError);
+  });
+
+  it("prefers GATEWAY_API_KEY over OPENAI_API_KEY", () => {
+    process.env["GATEWAY_API_KEY"] = "gw-primary";
+    process.env["OPENAI_API_KEY"] = "openai-fallback";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(cfg.apiKey).toBe("gw-primary");
+  });
+
+  it("falls back to OPENAI_API_KEY when GATEWAY_API_KEY is unset", () => {
+    process.env["OPENAI_API_KEY"] = "openai-only";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(cfg.apiKey).toBe("openai-only");
+  });
+
+  it("strips trailing slashes from OPENAI_BASE_URL", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["OPENAI_BASE_URL"] = "https://gateway.example/v1////";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(cfg.baseUrl).toBe("https://gateway.example/v1");
+  });
+
+  it("defaults to api.proto-labs.ai when OPENAI_BASE_URL is unset", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(cfg.baseUrl).toBe("https://api.proto-labs.ai/v1");
+  });
+
+  it("options.model wins over CLAWPATCH_GATEWAY_MODEL wins over default", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["CLAWPATCH_GATEWAY_MODEL"] = "env-model";
+    // eslint-disable-next-line no-underscore-dangle
+    const fromOpts = __testing.gatewayConfig({ model: "opts-model", reasoningEffort: null, skipGitRepoCheck: false });
+    expect(fromOpts.model).toBe("opts-model");
+    // eslint-disable-next-line no-underscore-dangle
+    const fromEnv = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(fromEnv.model).toBe("env-model");
+    delete process.env["CLAWPATCH_GATEWAY_MODEL"];
+    // eslint-disable-next-line no-underscore-dangle
+    const fromDefault = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(fromDefault.model).toBe("protolabs/smart");
+  });
+
+  it("parses CLAWPATCH_GATEWAY_TIMEOUT_MS and rejects garbage values", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "12345";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(12345);
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "not-a-number";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(300000);
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "-1";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(300000);
+  });
+});
+
+describe("gateway provider check()", () => {
+  const saved = {
+    gw: process.env["GATEWAY_API_KEY"],
+    oa: process.env["OPENAI_API_KEY"],
+    base: process.env["OPENAI_BASE_URL"],
+  };
+
+  afterEach(() => {
+    if (saved.gw === undefined) delete process.env["GATEWAY_API_KEY"];
+    else process.env["GATEWAY_API_KEY"] = saved.gw;
+    if (saved.oa === undefined) delete process.env["OPENAI_API_KEY"];
+    else process.env["OPENAI_API_KEY"] = saved.oa;
+    if (saved.base === undefined) delete process.env["OPENAI_BASE_URL"];
+    else process.env["OPENAI_BASE_URL"] = saved.base;
+  });
+
+  it("returns a fingerprint string when env is configured (no network call)", async () => {
+    delete process.env["OPENAI_API_KEY"];
+    process.env["GATEWAY_API_KEY"] = "test-key";
+    process.env["OPENAI_BASE_URL"] = "https://my.gateway/v1";
+    const out = await providerByName("gateway").check("/tmp");
+    expect(out).toContain("gateway");
+    expect(out).toContain("https://my.gateway/v1");
+    expect(out).toContain("protolabs/smart");
+    expect(out).not.toContain("test-key"); // never leak the secret into stdout
+  });
+
+  it("throws ClawpatchError when no API key is available", async () => {
+    delete process.env["GATEWAY_API_KEY"];
+    delete process.env["OPENAI_API_KEY"];
+    await expect(providerByName("gateway").check("/tmp")).rejects.toThrow(ClawpatchError);
   });
 });
 
