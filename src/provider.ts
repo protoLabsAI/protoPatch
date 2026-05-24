@@ -281,6 +281,9 @@ export function providerByName(name: string): Provider {
   if (name === "claude") {
     return claudeProvider;
   }
+  if (name === "gateway") {
+    return gatewayProvider;
+  }
   if (name === "mock") {
     return mockProvider;
   }
@@ -1327,6 +1330,177 @@ function piTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : PI_DEFAULT_TIMEOUT_MS;
 }
 
+// ── Gateway provider ─────────────────────────────────────────────────────────
+//
+// Talks to an OpenAI-compatible chat-completions endpoint with structured
+// outputs (response_format: json_schema). Designed for the protoLabs LiteLLM
+// gateway (api.proto-labs.ai/v1, internally http://gateway:4000/v1) — but
+// works against any OpenAI-compatible server (vanilla OpenAI, vLLM, LM Studio,
+// Ollama with OpenAI shim, etc.).
+//
+// Unlike the CLI-shim providers (claude, codex, acpx, ...), this provider does
+// NOT shell out. The prompts built by buildReviewPrompt() etc. already inline
+// the relevant file contents as Files blocks, so the gateway provider just
+// POSTs the full prompt with the JSON schema and returns the parsed response.
+//
+// Env:
+//   GATEWAY_API_KEY       (preferred) or OPENAI_API_KEY  — Bearer token
+//   OPENAI_BASE_URL       default: https://api.proto-labs.ai/v1
+//   CLAWPATCH_GATEWAY_MODEL  default: protolabs/smart
+//   CLAWPATCH_GATEWAY_TIMEOUT_MS  default: 300000 (5 min — reasoning models
+//                                                  on big features can be slow)
+
+const GATEWAY_DEFAULT_BASE_URL = "https://api.proto-labs.ai/v1";
+const GATEWAY_DEFAULT_MODEL = "protolabs/smart";
+const GATEWAY_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
+function gatewayConfig(options: ProviderOptions): {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  reasoningEffort: ReasoningEffort | null;
+  timeoutMs: number;
+} {
+  const apiKey = process.env["GATEWAY_API_KEY"] ?? process.env["OPENAI_API_KEY"];
+  if (!apiKey) {
+    throw new ClawpatchError(
+      "gateway provider needs GATEWAY_API_KEY or OPENAI_API_KEY in the environment",
+      4,
+      "provider-auth",
+    );
+  }
+  const rawBase = process.env["OPENAI_BASE_URL"] ?? GATEWAY_DEFAULT_BASE_URL;
+  const baseUrl = rawBase.replace(/\/+$/, "");
+  const model = options.model ?? process.env["CLAWPATCH_GATEWAY_MODEL"] ?? GATEWAY_DEFAULT_MODEL;
+  const timeoutRaw = process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] ?? process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
+  const parsedTimeout = timeoutRaw === undefined ? GATEWAY_DEFAULT_TIMEOUT_MS : Number(timeoutRaw);
+  const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : GATEWAY_DEFAULT_TIMEOUT_MS;
+  return { apiKey, baseUrl, model, reasoningEffort: options.reasoningEffort, timeoutMs };
+}
+
+async function runGatewayJson(
+  prompt: string,
+  options: ProviderOptions,
+  schema: object,
+  label: string,
+): Promise<unknown> {
+  const { apiKey, baseUrl, model, reasoningEffort, timeoutMs } = gatewayConfig(options);
+  const body: Record<string, unknown> = {
+    model,
+    messages: [{ role: "user", content: prompt }],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: label.replace(/\s+/g, "_"),
+        strict: true,
+        schema,
+      },
+    },
+  };
+  if (reasoningEffort && reasoningEffort !== "none") {
+    body["reasoning_effort"] = reasoningEffort;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ClawpatchError(
+      `gateway ${label}: request failed (${msg})`,
+      4,
+      "provider-failure",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new ClawpatchError(
+      `gateway ${label}: HTTP ${response.status} ${response.statusText} — ${errText.slice(0, 500)}`,
+      4,
+      "provider-failure",
+    );
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+  if (payload.error?.message) {
+    throw new ClawpatchError(
+      `gateway ${label}: API error — ${payload.error.message}`,
+      4,
+      "provider-failure",
+    );
+  }
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content || typeof content !== "string") {
+    throw new ClawpatchError(
+      `gateway ${label}: empty choices[0].message.content in response`,
+      4,
+      "provider-failure",
+    );
+  }
+  const extracted = extractJson(content);
+  if (extracted === null) {
+    throw new ClawpatchError(
+      `gateway ${label}: response was not parseable JSON (preview=${safeProviderPreview(content)})`,
+      4,
+      "provider-failure",
+    );
+  }
+  return extracted;
+}
+
+const gatewayProvider: Provider = {
+  name: "gateway",
+  async check(): Promise<string> {
+    // Auth check only — no actual fetch. Avoids spending tokens on a probe.
+    // gatewayConfig() throws ClawpatchError with code "provider-auth" if env
+    // is missing, which the caller's `clawpatch doctor` flow surfaces as the
+    // expected pre-flight failure.
+    const { baseUrl, model } = gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    return `gateway model=${model} base=${baseUrl}`;
+  },
+  async map(_root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
+    const output = await runGatewayJson(prompt, options, agentMapJsonSchema, "agent-map");
+    return parseOrThrow(agentMapOutputSchema, output, "gateway agent-map");
+  },
+  async review(
+    _root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<PartitionedReviewOutput> {
+    const output = await runGatewayJson(prompt, options, reviewJsonSchema, "review");
+    return parseReviewOutput(output);
+  },
+  async fix(_root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
+    const output = await runGatewayJson(prompt, options, fixPlanJsonSchema, "fix-plan");
+    return parseOrThrow(fixPlanOutputSchema, output, "gateway fix-plan");
+  },
+  async revalidate(
+    _root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<RevalidateOutput> {
+    const output = await runGatewayJson(prompt, options, revalidateJsonSchema, "revalidate");
+    return parseOrThrow(revalidateOutputSchema, output, "gateway revalidate");
+  },
+};
+
 const mockProvider: Provider = {
   name: "mock",
   async check(): Promise<string> {
@@ -2251,4 +2425,5 @@ export const __testing = {
   piThinkingLevel,
   providerExitCode,
   providerJsonSchema,
+  gatewayConfig,
 };
