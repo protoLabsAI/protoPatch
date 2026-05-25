@@ -20,6 +20,7 @@ permissions:
 jobs:
   publish:
     name: publish ${{ github.ref_name }}
+    # workspace-config: allow-hosted-runner npm publish --provenance requires hosted OIDC
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
