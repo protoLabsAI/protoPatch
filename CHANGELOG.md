@@ -8,7 +8,7 @@ to make our releases unambiguous against upstream. The CLI binary stays as
 `clawpatch` for downstream compatibility; `protopatch` is also installed as
 an alias for explicitness.
 
-## 0.6.0 - Unreleased (protoLabs fork)
+## 0.6.1 - Unreleased (protoLabs fork)
 
 - **provider**: added `proto` — drives the protoCLI agent
   (`@protolabsai/proto`) over ACP via acpx's `--agent` escape hatch. Same
@@ -18,11 +18,11 @@ an alias for explicitness.
   `--openai-base-url` / `--openai-api-key` env (typically set to the
   LiteLLM gateway in deployed environments).
 - Env knobs:
-    `CLAWPATCH_PROTO_MODEL`  default `protolabs/reasoning`
-    `CLAWPATCH_PROTO_TIMEOUT_MS` default 300000 (5 min);
-                                  `CLAWPATCH_PROVIDER_TIMEOUT_MS` is the
-                                  cross-provider fallback if proto-specific
-                                  is unset
+  `CLAWPATCH_PROTO_MODEL` default `protolabs/reasoning`
+  `CLAWPATCH_PROTO_TIMEOUT_MS` default 300000 (5 min);
+  `CLAWPATCH_PROVIDER_TIMEOUT_MS` is the
+  cross-provider fallback if proto-specific
+  is unset
 - `check()` validates both `acpx --version` AND `proto --version` so
   `clawpatch doctor` catches missing-CLI bootstrap failures explicitly.
 

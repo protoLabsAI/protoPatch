@@ -6,16 +6,16 @@ name: Publish to npm
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Git ref to publish (branch, tag, or SHA). Defaults to the workflow run ref.'
+        description: "Git ref to publish (branch, tag, or SHA). Defaults to the workflow run ref."
         required: false
 
 permissions:
   contents: read
-  id-token: write   # required for `npm publish --provenance`
+  id-token: write # required for `npm publish --provenance`
 
 jobs:
   publish:
@@ -39,7 +39,7 @@ jobs:
           cache: pnpm
           # registry-url makes `npm publish` write the right .npmrc and
           # consume $NODE_AUTH_TOKEN below.
-          registry-url: 'https://registry.npmjs.org'
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install
         run: pnpm install --frozen-lockfile
