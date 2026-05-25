@@ -37,8 +37,12 @@ jobs:
         with:
           node-version: 26
           cache: pnpm
-          # registry-url makes `npm publish` write the right .npmrc and
-          # consume $NODE_AUTH_TOKEN below.
+          # registry-url is still required so npm publish targets the
+          # public registry. Trusted Publishing (configured on
+          # npmjs.com/package/@protolabsai/protopatch/access) authenticates
+          # this workflow via the OIDC token issued by `id-token: write`
+          # below — no NPM_TOKEN secret in play. The same OIDC token also
+          # supplies provenance.
           registry-url: "https://registry.npmjs.org"
 
       - name: Install
@@ -70,10 +74,16 @@ jobs:
           echo "OK: package.json $PKG_VERSION == tag v$TAG_VERSION"
 
       - name: Publish to npm
-        # --provenance attests this build came from this workflow on this
-        # ref — a public, tamper-evident chain of custody. id-token: write
-        # at the job level + setup-node writing the registry URL is what
-        # makes that work without extra wiring.
+        # Trusted Publishing: npm reads the GitHub OIDC token from
+        # id-token: write and exchanges it for a short-lived publish
+        # credential — no NPM_TOKEN secret required. --provenance attests
+        # this build came from this workflow on this ref, a public,
+        # tamper-evident chain of custody.
+        #
+        # Prerequisite (one-time, npm UI):
+        #   npmjs.com/package/@protolabsai/protopatch/access →
+        #     Trusted Publishers → Add → GitHub Actions
+        #     repository:        protoLabsAI/protoPatch
+        #     workflow filename: publish.yml
+        #     environment:       (leave blank — none configured)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
