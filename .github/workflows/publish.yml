@@ -1,0 +1,79 @@
+name: Publish to npm
+
+# Fires when a SemVer tag (v1.2.3) is pushed. Manual workflow_dispatch is
+# kept as an escape hatch — handy for re-publishing after a bad release
+# without having to delete + re-push the tag.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to publish (branch, tag, or SHA). Defaults to the workflow run ref.'
+        required: false
+
+permissions:
+  contents: read
+  id-token: write   # required for `npm publish --provenance`
+
+jobs:
+  publish:
+    name: publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.1.2
+
+      - name: Setup Node + npm registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: pnpm
+          # registry-url makes `npm publish` write the right .npmrc and
+          # consume $NODE_AUTH_TOKEN below.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Build gate — refuse to publish a broken release. Mirrors ci.yml so
+      # the publish path can't accidentally diverge from the merge gate.
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Format check
+        run: pnpm format:check
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+      - name: Verify package.json version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match git tag ($TAG_VERSION)"
+            echo "Bump package.json and re-tag, or push a tag matching the package version."
+            exit 1
+          fi
+          echo "OK: package.json $PKG_VERSION == tag v$TAG_VERSION"
+
+      - name: Publish to npm
+        # --provenance attests this build came from this workflow on this
+        # ref — a public, tamper-evident chain of custody. id-token: write
+        # at the job level + setup-node writing the registry URL is what
+        # makes that work without extra wiring.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
