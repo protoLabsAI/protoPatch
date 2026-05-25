@@ -23,6 +23,10 @@ Provider names today:
 - `gateway`: HTTP POST to any OpenAI-compatible `/chat/completions` endpoint
   with structured outputs — no CLI dependency. **Added in the protoLabs fork
   (`@protolabsai/protopatch`).** See [Gateway](#gateway) below.
+- `proto`: drives the protoCLI agent (`@protolabsai/proto`) over ACP via
+  `acpx --agent "proto --acp"`. Tool-use review path complementary to
+  `gateway`'s stateless LLM path. **Added in `@protolabsai/protopatch@0.6.0`.**
+  See [Proto](#proto) below.
 - `mock`: deterministic provider for tests and fixtures
 - `mock-fail`: failure provider for tests
 
@@ -319,6 +323,62 @@ implementation uses `--trust` for the explicit trusted-workspace path and never
 uses `--force` or `--yolo`. Complete HITL verification before promoting this to
 default provider support, especially for ambient rules, MCP configuration,
 temporary prompt file handling, timeout behavior, and any claimed read-only mode.
+
+## Proto
+
+> Added in the protoLabs fork (`@protolabsai/protopatch`, 0.6.0). Not present
+> in upstream `openclaw/clawpatch`.
+
+Drives the protoCLI agent ([`@protolabsai/proto`](https://github.com/protoLabsAI/protoCLI))
+over the Agent Client Protocol. Built on top of acpx's `--agent` escape
+hatch so we don't need acpx to ship a `proto` subcommand upstream — the
+provider invokes `acpx --agent "proto --acp -m <model>"` and otherwise
+behaves identically to the `acpx` provider (same JSON-schema mechanics,
+same prompt/stdin contract).
+
+### Why use this over `gateway`
+
+- **`gateway`** sends an already-assembled prompt (with file contents inlined)
+  to an OpenAI-compatible endpoint. Fast, cheap, stateless. Right for the
+  common case.
+- **`proto`** spawns protoCLI as a live ACP agent. The agent has tool access
+  while the review is running — it can read additional files, run
+  `--lsp`-backed code-intel queries, run typecheck/lint via shell access,
+  etc. Slower + more tokens, but produces deeper structural review.
+
+Pick `proto` when you want the agent to actively investigate the codebase
+during review rather than just react to what's pre-inlined.
+
+### Configuration
+
+```bash
+clawpatch review --provider proto --model protolabs/reasoning
+```
+
+Or in `.clawpatch/config.json`:
+
+```json
+{
+  "provider": { "name": "proto", "model": "protolabs/reasoning" }
+}
+```
+
+### Environment
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `OPENAI_BASE_URL` | (proto default) | Forwarded to protoCLI via env inheritance. Typically the LiteLLM gateway: `http://gateway:4000/v1` inside the docker network. |
+| `OPENAI_API_KEY` | (proto default) | Bearer token protoCLI uses to authenticate to the model provider. |
+| `CLAWPATCH_PROTO_MODEL` | `protolabs/reasoning` | Default model passed to `proto --acp -m <model>`. CLI `--model` flag overrides. |
+| `CLAWPATCH_PROTO_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Proto-specific timeout wins; provider-wide fallback applies if proto-specific is unset. |
+
+### Requirements
+
+- `acpx` ≥ 0.10.0 installed and on PATH (the ACP driver)
+- `proto` (`@protolabsai/proto`) installed and on PATH (the agent it drives)
+
+`clawpatch doctor` validates both binaries with `--version` checks before
+spending any LLM tokens.
 
 ## Gateway
 

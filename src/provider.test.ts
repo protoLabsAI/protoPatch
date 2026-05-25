@@ -1649,10 +1649,94 @@ describe("providerByName", () => {
     expect(providerByName("gateway").name).toBe("gateway");
   });
 
+  it("returns the proto provider (drives protoCLI via acpx --agent escape hatch)", () => {
+    expect(providerByName("proto").name).toBe("proto");
+  });
+
   it("still supports codex, mock, and mock-fail", () => {
     expect(providerByName("codex").name).toBe("codex");
     expect(providerByName("mock").name).toBe("mock");
     expect(providerByName("mock-fail").name).toBe("mock-fail");
+  });
+});
+
+describe("proto provider helpers", () => {
+  const ENV_KEYS = [
+    "CLAWPATCH_PROTO_MODEL",
+    "CLAWPATCH_PROTO_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) snapshot[k] = process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  it("protoAgentCommand defaults to protolabs/reasoning when nothing is set", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const cmd = __testing.protoAgentCommand({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(cmd).toBe("proto --acp -m protolabs/reasoning");
+  });
+
+  it("options.model > CLAWPATCH_PROTO_MODEL > default", () => {
+    process.env["CLAWPATCH_PROTO_MODEL"] = "env-model";
+    // eslint-disable-next-line no-underscore-dangle
+    const fromOpts = __testing.protoAgentCommand({ model: "opts-model", reasoningEffort: null, skipGitRepoCheck: false });
+    expect(fromOpts).toBe("proto --acp -m opts-model");
+    // eslint-disable-next-line no-underscore-dangle
+    const fromEnv = __testing.protoAgentCommand({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    expect(fromEnv).toBe("proto --acp -m env-model");
+  });
+
+  it("buildProtoAcpxArgs (read mode) uses --agent escape hatch and approve-reads", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const args = __testing.buildProtoAcpxArgs("/some/root", { model: null, reasoningEffort: null, skipGitRepoCheck: false }, "read");
+    expect(args[0]).toBe("--agent");
+    expect(args[1]).toBe("proto --acp -m protolabs/reasoning");
+    expect(args).toContain("--cwd");
+    expect(args).toContain("/some/root");
+    expect(args).toContain("--approve-reads");
+    expect(args).toContain("--format");
+    expect(args).toContain("json");
+    expect(args).toContain("--json-strict");
+    expect(args).toContain("--suppress-reads");
+    // tail of args: exec --file -
+    expect(args.slice(-3)).toEqual(["exec", "--file", "-"]);
+  });
+
+  it("buildProtoAcpxArgs (approve mode) uses --approve-all (write-capable)", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const args = __testing.buildProtoAcpxArgs("/r", { model: null, reasoningEffort: null, skipGitRepoCheck: false }, "approve");
+    expect(args).toContain("--approve-all");
+    expect(args).not.toContain("--approve-reads");
+  });
+
+  it("protoTimeoutMs honors CLAWPATCH_PROTO_TIMEOUT_MS then provider-wide fallback then 5-min default", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.protoTimeoutMs()).toBe(5 * 60 * 1000);
+    process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"] = "120000";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.protoTimeoutMs()).toBe(120000);
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "90000";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.protoTimeoutMs()).toBe(90000); // proto-specific wins
+  });
+
+  it("protoTimeoutMs rejects garbage values (falls back to 5-min default)", () => {
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "not-a-number";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.protoTimeoutMs()).toBe(5 * 60 * 1000);
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "-1";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(__testing.protoTimeoutMs()).toBe(5 * 60 * 1000);
   });
 });
 
