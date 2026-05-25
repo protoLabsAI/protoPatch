@@ -1,6 +1,6 @@
 {
   "name": "@protolabsai/protopatch",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
   "license": "MIT",
   "repository": {

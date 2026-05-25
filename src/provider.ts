@@ -269,6 +269,9 @@ export function providerByName(name: string): Provider {
   if (name === "acpx") {
     return acpxProvider;
   }
+  if (name === "proto") {
+    return protoProvider;
+  }
   if (name === "grok") {
     return grokProvider;
   }
@@ -406,6 +409,162 @@ const acpxProvider: Provider = {
   ): Promise<RevalidateOutput> {
     return runAcpxJson(root, prompt, options.model, revalidateJsonSchema, "read", (output) =>
       parseOrThrow(revalidateOutputSchema, output, "acpx revalidate"),
+    );
+  },
+};
+
+// ── proto provider ───────────────────────────────────────────────────────────
+//
+// Routes through `acpx --agent "proto --acp"` to drive protoCLI
+// (@protolabsai/proto) as an ACP agent. Same prompt + JSON-schema mechanics
+// as the acpx provider, but uses acpx's --agent escape hatch instead of a
+// registered subcommand because acpx doesn't ship a `proto` subcommand
+// upstream.
+//
+// Auth + model selection happen on protoCLI's side:
+//   OPENAI_BASE_URL     points protoCLI at the LiteLLM gateway
+//                       (http://gateway:4000/v1 inside the workstacean
+//                       container, https://api.proto-labs.ai/v1 externally)
+//   OPENAI_API_KEY      bearer token for the gateway
+//   CLAWPATCH_PROTO_MODEL  default model passed to `proto --acp -m <model>`;
+//                          options.model on the CLI still wins
+//
+// CLAWPATCH_PROTO_TIMEOUT_MS overrides the default 5-min timeout.
+
+const PROTO_DEFAULT_MODEL = "protolabs/reasoning";
+const PROTO_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
+function protoTimeoutMs(): number {
+  const raw =
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] ?? process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
+  if (raw === undefined) return PROTO_DEFAULT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : PROTO_DEFAULT_TIMEOUT_MS;
+}
+
+function protoAgentCommand(options: ProviderOptions): string {
+  // Build the inner `proto --acp` invocation acpx hands off to. protoCLI
+  // honors `-m <model>` for model selection. We prefer options.model
+  // (per-invocation CLI override), then CLAWPATCH_PROTO_MODEL env, then the
+  // package default.
+  const model = options.model ?? process.env["CLAWPATCH_PROTO_MODEL"] ?? PROTO_DEFAULT_MODEL;
+  return `proto --acp -m ${model}`;
+}
+
+export function buildProtoAcpxArgs(
+  root: string,
+  options: ProviderOptions,
+  permission: "read" | "approve",
+): string[] {
+  const permFlag = permission === "read" ? "--approve-reads" : "--approve-all";
+  const args = [
+    "--agent",
+    protoAgentCommand(options),
+    "--cwd",
+    root,
+    permFlag,
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+  ];
+  const promptRetries = acpxPromptRetries();
+  if (permission === "read" && promptRetries > 0) {
+    args.push("--prompt-retries", String(promptRetries));
+  }
+  args.push("exec", "--file", "-");
+  return args;
+}
+
+async function runProtoJson<T>(
+  root: string,
+  prompt: string,
+  options: ProviderOptions,
+  schema: object,
+  permission: "read" | "approve",
+  parseOutput: (output: unknown) => T,
+): Promise<T> {
+  const args = buildProtoAcpxArgs(root, options, permission);
+  const result = await runCommandArgs(
+    "acpx",
+    args,
+    root,
+    buildAcpxPrompt(prompt, schema, permission),
+    { trimOutput: false, timeoutMs: protoTimeoutMs() },
+  );
+  if (result.exitCode !== 0) {
+    // Reuse acpxFailureMessage — the underlying CLI is acpx; the failure
+    // shape (auth, timeout, JSON-parse) is identical. The caller can tell
+    // from the prefix on the message that this came through the proto
+    // provider.
+    const baseMessage = acpxFailureMessage(result.stdout, result.stderr, result.exitCode);
+    throw new ClawpatchError(
+      baseMessage.replace(/^acpx provider failed/, "proto provider failed"),
+      providerExitCode(result.stdout, result.stderr),
+      "provider-failure",
+    );
+  }
+  const json = extractAcpxJson(result.stdout);
+  if (json === null) {
+    throw new ClawpatchError(
+      `proto: response was not parseable JSON (preview=${safeProviderPreview(result.stdout)})`,
+      4,
+      "provider-failure",
+    );
+  }
+  return parseOutput(json);
+}
+
+const protoProvider: Provider = {
+  name: "proto",
+  async check(root: string): Promise<string> {
+    // Confirm both ends of the wire: acpx (the ACP driver) and proto (the
+    // agent it'll spawn). check() is allowed to spend a few ms but not LLM
+    // tokens — versions are enough.
+    const acpxR = await runCommandArgs("acpx", ["--version"], root);
+    if (acpxR.exitCode !== 0) {
+      throw new ClawpatchError(
+        "acpx CLI not available (needed to drive proto via ACP). Install: npm install -g acpx@latest",
+        4,
+        "provider-auth",
+      );
+    }
+    const protoR = await runCommandArgs("proto", ["--version"], root);
+    if (protoR.exitCode !== 0) {
+      throw new ClawpatchError(
+        "proto CLI not available. Install: npm install -g @protolabsai/proto",
+        4,
+        "provider-auth",
+      );
+    }
+    return `acpx=${acpxR.stdout.trim()} proto=${protoR.stdout.trim()}`;
+  },
+  async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
+    return runProtoJson(root, prompt, options, agentMapJsonSchema, "read", (output) =>
+      parseOrThrow(agentMapOutputSchema, output, "proto agent-map"),
+    );
+  },
+  async review(
+    root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<PartitionedReviewOutput> {
+    return runProtoJson(root, prompt, options, reviewJsonSchema, "read", (output) =>
+      parseReviewOutput(output),
+    );
+  },
+  async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
+    return runProtoJson(root, prompt, options, fixPlanJsonSchema, "approve", (output) =>
+      parseOrThrow(fixPlanOutputSchema, output, "proto fix-plan"),
+    );
+  },
+  async revalidate(
+    root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<RevalidateOutput> {
+    return runProtoJson(root, prompt, options, revalidateJsonSchema, "read", (output) =>
+      parseOrThrow(revalidateOutputSchema, output, "proto revalidate"),
     );
   },
 };
@@ -2426,4 +2585,7 @@ export const __testing = {
   providerExitCode,
   providerJsonSchema,
   gatewayConfig,
+  buildProtoAcpxArgs,
+  protoAgentCommand,
+  protoTimeoutMs,
 };
