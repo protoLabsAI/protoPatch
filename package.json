@@ -1,18 +1,15 @@
 {
   "name": "@protolabsai/protopatch",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/protoLabsAI/protoPatch.git"
-  },
   "homepage": "https://github.com/protoLabsAI/protoPatch#readme",
   "bugs": {
     "url": "https://github.com/protoLabsAI/protoPatch/issues"
   },
-  "publishConfig": {
-    "access": "public"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/protoLabsAI/protoPatch.git"
   },
   "bin": {
     "clawpatch": "dist/cli.js",
@@ -25,6 +22,9 @@
     "CHANGELOG.md"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "prepack": "pnpm -s build",

@@ -1682,23 +1682,39 @@ describe("proto provider helpers", () => {
 
   it("protoAgentCommand defaults to protolabs/reasoning when nothing is set", () => {
     // eslint-disable-next-line no-underscore-dangle
-    const cmd = __testing.protoAgentCommand({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const cmd = __testing.protoAgentCommand({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(cmd).toBe("proto --acp -m protolabs/reasoning");
   });
 
   it("options.model > CLAWPATCH_PROTO_MODEL > default", () => {
     process.env["CLAWPATCH_PROTO_MODEL"] = "env-model";
     // eslint-disable-next-line no-underscore-dangle
-    const fromOpts = __testing.protoAgentCommand({ model: "opts-model", reasoningEffort: null, skipGitRepoCheck: false });
+    const fromOpts = __testing.protoAgentCommand({
+      model: "opts-model",
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(fromOpts).toBe("proto --acp -m opts-model");
     // eslint-disable-next-line no-underscore-dangle
-    const fromEnv = __testing.protoAgentCommand({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const fromEnv = __testing.protoAgentCommand({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(fromEnv).toBe("proto --acp -m env-model");
   });
 
   it("buildProtoAcpxArgs (read mode) uses --agent escape hatch and approve-reads", () => {
     // eslint-disable-next-line no-underscore-dangle
-    const args = __testing.buildProtoAcpxArgs("/some/root", { model: null, reasoningEffort: null, skipGitRepoCheck: false }, "read");
+    const args = __testing.buildProtoAcpxArgs(
+      "/some/root",
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      "read",
+    );
     expect(args[0]).toBe("--agent");
     expect(args[1]).toBe("proto --acp -m protolabs/reasoning");
     expect(args).toContain("--cwd");
@@ -1714,7 +1730,11 @@ describe("proto provider helpers", () => {
 
   it("buildProtoAcpxArgs (approve mode) uses --approve-all (write-capable)", () => {
     // eslint-disable-next-line no-underscore-dangle
-    const args = __testing.buildProtoAcpxArgs("/r", { model: null, reasoningEffort: null, skipGitRepoCheck: false }, "approve");
+    const args = __testing.buildProtoAcpxArgs(
+      "/r",
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      "approve",
+    );
     expect(args).toContain("--approve-all");
     expect(args).not.toContain("--approve-reads");
   });
@@ -1774,14 +1794,22 @@ describe("gateway provider config", () => {
     process.env["GATEWAY_API_KEY"] = "gw-primary";
     process.env["OPENAI_API_KEY"] = "openai-fallback";
     // eslint-disable-next-line no-underscore-dangle
-    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const cfg = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(cfg.apiKey).toBe("gw-primary");
   });
 
   it("falls back to OPENAI_API_KEY when GATEWAY_API_KEY is unset", () => {
     process.env["OPENAI_API_KEY"] = "openai-only";
     // eslint-disable-next-line no-underscore-dangle
-    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const cfg = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(cfg.apiKey).toBe("openai-only");
   });
 
@@ -1789,14 +1817,22 @@ describe("gateway provider config", () => {
     process.env["GATEWAY_API_KEY"] = "k";
     process.env["OPENAI_BASE_URL"] = "https://gateway.example/v1////";
     // eslint-disable-next-line no-underscore-dangle
-    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const cfg = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(cfg.baseUrl).toBe("https://gateway.example/v1");
   });
 
   it("defaults to api.proto-labs.ai when OPENAI_BASE_URL is unset", () => {
     process.env["GATEWAY_API_KEY"] = "k";
     // eslint-disable-next-line no-underscore-dangle
-    const cfg = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const cfg = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(cfg.baseUrl).toBe("https://api.proto-labs.ai/v1");
   });
 
@@ -1804,14 +1840,26 @@ describe("gateway provider config", () => {
     process.env["GATEWAY_API_KEY"] = "k";
     process.env["CLAWPATCH_GATEWAY_MODEL"] = "env-model";
     // eslint-disable-next-line no-underscore-dangle
-    const fromOpts = __testing.gatewayConfig({ model: "opts-model", reasoningEffort: null, skipGitRepoCheck: false });
+    const fromOpts = __testing.gatewayConfig({
+      model: "opts-model",
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(fromOpts.model).toBe("opts-model");
     // eslint-disable-next-line no-underscore-dangle
-    const fromEnv = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const fromEnv = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(fromEnv.model).toBe("env-model");
     delete process.env["CLAWPATCH_GATEWAY_MODEL"];
     // eslint-disable-next-line no-underscore-dangle
-    const fromDefault = __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const fromDefault = __testing.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     expect(fromDefault.model).toBe("protolabs/smart");
   });
 
@@ -1819,13 +1867,22 @@ describe("gateway provider config", () => {
     process.env["GATEWAY_API_KEY"] = "k";
     process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "12345";
     // eslint-disable-next-line no-underscore-dangle
-    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(12345);
+    expect(
+      __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false })
+        .timeoutMs,
+    ).toBe(12345);
     process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "not-a-number";
     // eslint-disable-next-line no-underscore-dangle
-    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(300000);
+    expect(
+      __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false })
+        .timeoutMs,
+    ).toBe(300000);
     process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "-1";
     // eslint-disable-next-line no-underscore-dangle
-    expect(__testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false }).timeoutMs).toBe(300000);
+    expect(
+      __testing.gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false })
+        .timeoutMs,
+    ).toBe(300000);
   });
 });
 

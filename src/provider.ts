@@ -1531,9 +1531,13 @@ function gatewayConfig(options: ProviderOptions): {
   const rawBase = process.env["OPENAI_BASE_URL"] ?? GATEWAY_DEFAULT_BASE_URL;
   const baseUrl = rawBase.replace(/\/+$/, "");
   const model = options.model ?? process.env["CLAWPATCH_GATEWAY_MODEL"] ?? GATEWAY_DEFAULT_MODEL;
-  const timeoutRaw = process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] ?? process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
+  const timeoutRaw =
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] ?? process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
   const parsedTimeout = timeoutRaw === undefined ? GATEWAY_DEFAULT_TIMEOUT_MS : Number(timeoutRaw);
-  const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : GATEWAY_DEFAULT_TIMEOUT_MS;
+  const timeoutMs =
+    Number.isFinite(parsedTimeout) && parsedTimeout > 0
+      ? parsedTimeout
+      : GATEWAY_DEFAULT_TIMEOUT_MS;
   return { apiKey, baseUrl, model, reasoningEffort: options.reasoningEffort, timeoutMs };
 }
 
@@ -1576,11 +1580,7 @@ async function runGatewayJson(
   } catch (err) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : String(err);
-    throw new ClawpatchError(
-      `gateway ${label}: request failed (${msg})`,
-      4,
-      "provider-failure",
-    );
+    throw new ClawpatchError(`gateway ${label}: request failed (${msg})`, 4, "provider-failure");
   } finally {
     clearTimeout(timer);
   }
@@ -1631,7 +1631,11 @@ const gatewayProvider: Provider = {
     // gatewayConfig() throws ClawpatchError with code "provider-auth" if env
     // is missing, which the caller's `clawpatch doctor` flow surfaces as the
     // expected pre-flight failure.
-    const { baseUrl, model } = gatewayConfig({ model: null, reasoningEffort: null, skipGitRepoCheck: false });
+    const { baseUrl, model } = gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
     return `gateway model=${model} base=${baseUrl}`;
   },
   async map(_root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {

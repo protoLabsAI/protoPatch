@@ -365,12 +365,12 @@ Or in `.clawpatch/config.json`:
 
 ### Environment
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `OPENAI_BASE_URL` | (proto default) | Forwarded to protoCLI via env inheritance. Typically the LiteLLM gateway: `http://gateway:4000/v1` inside the docker network. |
-| `OPENAI_API_KEY` | (proto default) | Bearer token protoCLI uses to authenticate to the model provider. |
-| `CLAWPATCH_PROTO_MODEL` | `protolabs/reasoning` | Default model passed to `proto --acp -m <model>`. CLI `--model` flag overrides. |
-| `CLAWPATCH_PROTO_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Proto-specific timeout wins; provider-wide fallback applies if proto-specific is unset. |
+| Variable                                                          | Default               | Notes                                                                                                                         |
+| ----------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_BASE_URL`                                                 | (proto default)       | Forwarded to protoCLI via env inheritance. Typically the LiteLLM gateway: `http://gateway:4000/v1` inside the docker network. |
+| `OPENAI_API_KEY`                                                  | (proto default)       | Bearer token protoCLI uses to authenticate to the model provider.                                                             |
+| `CLAWPATCH_PROTO_MODEL`                                           | `protolabs/reasoning` | Default model passed to `proto --acp -m <model>`. CLI `--model` flag overrides.                                               |
+| `CLAWPATCH_PROTO_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)      | Proto-specific timeout wins; provider-wide fallback applies if proto-specific is unset.                                       |
 
 ### Requirements
 
@@ -404,7 +404,7 @@ vanilla OpenAI, vLLM, LM Studio, Ollama with the OpenAI shim, etc.
 Pick `gateway` over `claude` / `codex` / `acpx` when:
 
 - You are running clawpatch inside a container or CI runner where installing
-  + OAuth-ing a per-agent CLI is impractical.
+  - OAuth-ing a per-agent CLI is impractical.
 - You already have an OpenAI-compatible LLM endpoint and want a uniform
   provider abstraction across multiple tools.
 - You want a provider that fails fast on auth and reports HTTP errors
@@ -426,13 +426,13 @@ Or set the provider once in `.clawpatch/config.json`:
 
 ### Environment
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY` | required | Bearer token. The gateway provider refuses to start without one. |
-| `OPENAI_BASE_URL` | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped. |
-| `CLAWPATCH_GATEWAY_MODEL` | `protolabs/smart` | `--model` on the CLI overrides. |
-| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
-| `--reasoning-effort none|minimal|low|medium|high|xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
+| Variable                                                            | Default                        | Notes                                                                                    |
+| ------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------- | ------ | ---- | ------ | ------- | -------------------------------------------------------------------- |
+| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY`                   | required                       | Bearer token. The gateway provider refuses to start without one.                         |
+| `OPENAI_BASE_URL`                                                   | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped.                                                           |
+| `CLAWPATCH_GATEWAY_MODEL`                                           | `protolabs/smart`              | `--model` on the CLI overrides.                                                          |
+| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)               | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
+| `--reasoning-effort none                                            | minimal                        | low                                                                                      | medium | high | xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
 
 ### Why this can be the minimal provider
 
