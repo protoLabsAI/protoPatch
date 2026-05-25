@@ -23,6 +23,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    # workspace-config: allow-hosted-runner GitHub Pages deploy requires the hosted Pages environment
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
