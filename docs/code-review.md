@@ -122,3 +122,30 @@ Categories requested from the provider:
 
 Review does not edit files. Use `clawpatch fix --finding <id>` for the explicit
 patch loop.
+
+## The merge gate (`ci/protopatch-gate.py`)
+
+The canonical CI gate over `clawpatch report` output — consuming repos vendor it
+into `.github/scripts/` and sync from here (the parser tracks `reporting.ts`'s
+format; protoAgent#1874 defined the semantics once to stop per-repo drift):
+
+- **Category filter** — inform-only categories (test-gap, maintainability, style,
+  docs, perf, …) never gate; correctness/security at critical/high/medium do.
+- **File scope** — with `changed-files.txt`, findings outside the diff inform only.
+- **Line scope** — with the PR's unified diff as the third arg, a finding blocks
+  only if evidence lines intersect a changed hunk (±3 context lines). Pre-existing
+  debt on untouched lines of a touched file informs instead of taxing the PR.
+  Line-less evidence on a touched file still blocks (fail closed on format drift).
+- **Waive** — the PR body may carry `protopatch-waive: <findingId> — <reason>`
+  lines (pass the body via `$PROTOPATCH_WAIVERS`); waived findings inform and are
+  logged loudly in the step summary. An audited decision, never a silent skip.
+
+```yaml
+- name: Gate on blocking findings
+  env:
+    PROTOPATCH_WAIVERS: ${{ github.event.pull_request.body }}
+  run: |
+    git diff --name-only "origin/${{ github.base_ref }}...HEAD" > changed-files.txt
+    git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+    python3 .github/scripts/protopatch-gate.py clawpatch-report.md changed-files.txt pr.diff
+```
