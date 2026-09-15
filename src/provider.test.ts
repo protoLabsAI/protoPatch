@@ -2106,9 +2106,34 @@ describe("extractJson reasoning blocks", () => {
     expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
   });
 
-  it("falls back to the whole text when nothing parses after the block", () => {
+  it("ignores a closing tag that does not follow a leading reasoning block", () => {
     const input = '{"outcome":"fixed","reasoning":"ok","commands":[]}</think> trailing words';
     expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  // Regression (round-2 review): a valid reply whose string quotes `</think>`
+  // and later a `{}` literal must come back whole, not as `{}`.
+  it("returns a valid reply whole even when a string quotes </think> and {}", () => {
+    const reply = {
+      findings: [],
+      inspected: {
+        files: [],
+        symbols: [],
+        notes: ["x.split('</think>')[-1] if '</think>' in x else {}"],
+      },
+    };
+    expect(extractJson(JSON.stringify(reply))).toEqual(reply);
+  });
+
+  it("keeps a fenced or prose-wrapped reply whole when a string quotes </think> {}", () => {
+    const reply = { notes: ["strip it: </think> {} then parse"] };
+    expect(extractJson("```json\n" + JSON.stringify(reply) + "\n```")).toEqual(reply);
+    expect(extractJson(`Result: ${JSON.stringify(reply)} done`)).toEqual(reply);
+  });
+
+  it("ends a leading reasoning block at its first close tag", () => {
+    const reply = { notes: ["</think> {}"] };
+    expect(extractJson(`<think>plan { draft</think>${JSON.stringify(reply)}`)).toEqual(reply);
   });
 });
 
@@ -2150,12 +2175,31 @@ function sentBody(fetchMock: ReturnType<typeof stubGateway>, call = 0): Record<s
   return JSON.parse(String(init?.body)) as Record<string, unknown>;
 }
 
+// Like stubGateway, but the reply arrives after `delayMs`, and an abort of the
+// request signal rejects the call the way real fetch does.
+function stubSlowGateway(delayMs: number, reply: Record<string, unknown>) {
+  const fetchMock = vi.fn(
+    (_url: string, init: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve(new Response(JSON.stringify(reply), { status: 200 }));
+        }, delayMs);
+        init.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("This operation was aborted", "AbortError"));
+        });
+      }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 function gatewayReviewOptions(dir: string | null) {
   return { model: null, reasoningEffort: null, skipGitRepoCheck: false, diagnosticsDir: dir };
 }
 
 function capturePathFrom(error: ClawpatchError): string {
-  const match = error.message.match(/— full response: (.+)$/u);
+  const match = error.message.match(/full response saved to (.+?) — /u);
   if (!match?.[1]) throw new Error(`no capture path in: ${error.message}`);
   return match[1];
 }
@@ -2248,7 +2292,7 @@ describe("gateway provider replies", () => {
     expect(out.findings).toHaveLength(1);
   });
 
-  it("reports a reply cut off at the output limit as a retryable truncation", async () => {
+  it("reports a reply cut off at the output limit as a truncation it does not retry", async () => {
     stubGateway(
       chatReply(REVIEW_JSON.slice(0, 180), "length", {
         usage: {
@@ -2261,8 +2305,8 @@ describe("gateway provider replies", () => {
     const error = await reviewError();
     expect(error.exitCode).toBe(4);
     expect(error.code).toBe("provider-failure");
-    expect(error.retryable).toBe(true);
-    expect(error.message).toContain("gateway review: response truncated at the output limit");
+    expect(error.retryable).toBe(false);
+    expect(error.message).toContain(" — response truncated at the output limit (");
     expect(error.message).not.toContain("not parseable");
     expect(error.message).toContain("finish_reason=length");
     expect(error.message).toContain("completion_tokens=32000");
@@ -2291,7 +2335,7 @@ describe("gateway provider replies", () => {
     expect(error.message).toContain("response truncated at the output limit");
     expect(error.message).toContain("content_chars=0");
     expect(error.message).toContain("reasoning_chars=500");
-    expect(error.retryable).toBe(true);
+    expect(error.retryable).toBe(false);
   });
 
   it("keeps a complete answer even when finish_reason is length", async () => {
@@ -2312,7 +2356,7 @@ describe("gateway provider replies", () => {
     expect(error.exitCode).toBe(4);
     expect(error.code).toBe("provider-failure");
     expect(error.retryable).toBe(true);
-    expect(error.message).toContain("gateway review: response was not parseable JSON");
+    expect(error.message).toContain(" — response was not parseable JSON (");
     expect(error.message).toContain("finish_reason=stop");
     expect(error.message).toContain(`content_chars=${broken.length}`);
     // the tail shows where the JSON broke, not the uninformative head
@@ -2335,7 +2379,7 @@ describe("gateway provider replies", () => {
     stubGateway(chatReply("definitely not json", "stop"));
     const error = await reviewError(null);
     expect(error.message).toContain("response was not parseable JSON");
-    expect(error.message).not.toContain("full response:");
+    expect(error.message).not.toContain("full response saved to");
     await expect(readdir(diagnosticsDir)).rejects.toThrow();
   });
 
@@ -2363,11 +2407,13 @@ describe("gateway provider replies", () => {
     expect(sentBody(fetchMock)["max_tokens"]).toBe(48000);
     expect(error.message).toContain("max_tokens=48000");
 
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     for (const garbage of ["", "abc", "0", "-5", "1.5"]) {
       process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = garbage;
       // eslint-disable-next-line no-underscore-dangle
       expect(__testing.gatewayConfig(gatewayReviewOptions(diagnosticsDir)).maxTokens).toBeNull();
     }
+    write.mockRestore();
   });
 
   it("treats a 200 body that is not JSON as a retryable provider-failure", async () => {
@@ -2376,7 +2422,7 @@ describe("gateway provider replies", () => {
     expect(error.exitCode).toBe(4);
     expect(error.code).toBe("provider-failure");
     expect(error.retryable).toBe(true);
-    expect(error.message).toContain("gateway review: response body was not JSON");
+    expect(error.message).toContain(" — response body was not JSON (");
   });
 
   it("keeps an API error in the body non-retryable", async () => {
@@ -2385,6 +2431,92 @@ describe("gateway provider replies", () => {
     expect(error.exitCode).toBe(4);
     expect(error.code).toBe("provider-failure");
     expect(error.retryable).toBe(false);
-    expect(error.message).toContain("gateway review: API error — model not found");
+    expect(error.message).toMatch(
+      /^gateway review: full response saved to .+ — API error — model not found$/u,
+    );
+  });
+
+  it("keeps the failure class and facts in the last 400 chars of stderr", async () => {
+    // pr-reviewer keeps only the last 400 chars of stderr; a long state-dir
+    // path must not push out what failed.
+    diagnosticsDir = join(
+      await fixtureRoot("clawpatch-gateway-long-"),
+      "a".repeat(180),
+      "b".repeat(180),
+      "provider-failures",
+    );
+    stubGateway(
+      chatReply(REVIEW_JSON.slice(0, 120), "length", {
+        usage: { prompt_tokens: 91234, completion_tokens: 32000 },
+      }),
+    );
+    const truncated = await reviewError();
+    expect(truncated.message.startsWith("gateway review: full response saved to ")).toBe(true);
+    expect(capturePathFrom(truncated).length).toBeGreaterThan(400);
+    const truncatedTail = `error: ${truncated.message}`.slice(-400);
+    expect(truncatedTail).toContain("response truncated at the output limit");
+    expect(truncatedTail).toContain("finish_reason=length");
+    expect(truncatedTail).toContain("completion_tokens=32000");
+
+    stubGateway(chatReply(`${REVIEW_JSON.slice(0, 120)} ${"x".repeat(500)}`, "stop"));
+    const unparseable = await reviewError();
+    const unparseableTail = `error: ${unparseable.message}`.slice(-400);
+    expect(unparseableTail).toContain("response was not parseable JSON");
+    expect(unparseableTail).toContain("finish_reason=stop");
+  });
+
+  it("does not offer a retry when the attempt used more than half the timeout", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "400";
+    stubSlowGateway(250, chatReply("{ not json", "stop"));
+    const error = await reviewError();
+    expect(error.message).toContain("response was not parseable JSON");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("offers a retry for an unparseable reply that came back quickly", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "10000";
+    stubSlowGateway(10, chatReply("{ not json", "stop"));
+    const error = await reviewError();
+    expect(error.retryable).toBe(true);
+  });
+
+  it("gives a retry only the time left under the call's shared deadline", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "300";
+    stubSlowGateway(5000, chatReply(REVIEW_JSON));
+    const started = Date.now();
+    const error = await providerByName("gateway")
+      .review("/tmp", "review this", {
+        ...gatewayReviewOptions(diagnosticsDir),
+        callStartedAt: started - 250,
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(error).toBeInstanceOf(ClawpatchError);
+    expect((error as ClawpatchError).exitCode).toBe(4);
+    expect((error as ClawpatchError).message).toBe(
+      "gateway review: request failed (no reply within the 300ms gateway timeout)",
+    );
+  });
+
+  it("warns once on an invalid CLAWPATCH_GATEWAY_MAX_TOKENS and sends none", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = "32k-typo";
+      const fetchMock = stubGateway(chatReply(REVIEW_JSON));
+      await providerByName("gateway").review("/tmp", "a", gatewayReviewOptions(diagnosticsDir));
+      await providerByName("gateway").review("/tmp", "b", gatewayReviewOptions(diagnosticsDir));
+      expect(sentBody(fetchMock)).not.toHaveProperty("max_tokens");
+      const warnings = write.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((line) => line.includes("CLAWPATCH_GATEWAY_MAX_TOKENS"));
+      expect(warnings).toEqual([
+        'warning: ignoring CLAWPATCH_GATEWAY_MAX_TOKENS="32k-typo" (expected a positive integer); no max_tokens is sent\n',
+      ]);
+    } finally {
+      write.mockRestore();
+    }
   });
 });

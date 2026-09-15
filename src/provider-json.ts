@@ -1,14 +1,19 @@
 import { ClawpatchError } from "./errors.js";
 
-// Closing tag of an inline reasoning block (`<think>…</think>` and friends),
-// which reasoning models emit in `content` when the server has no reasoning
-// parser configured.
-const REASONING_BLOCK_CLOSE = /<\/(?:think|thinking|reasoning)>/giu;
+// Opening tag of an inline reasoning block (`<think>…</think>` and friends)
+// that a reasoning model puts at the very start of `content` when the server
+// has no reasoning parser configured.
+const LEADING_REASONING_OPEN = /^\s*<(think|thinking|reasoning)>/iu;
 
 export function extractJson(text: string): unknown | null {
-  // A reasoning preamble can hold unbalanced braces (`if (x) {`) or a draft
-  // object, so try the answer that follows the last closing tag first.
-  const afterReasoning = textAfterReasoningBlock(text);
+  // A reply that is valid JSON as a whole is the answer, whatever its strings
+  // quote — a finding can mention `</think>` followed by a `{}` literal.
+  try {
+    return JSON.parse(text);
+  } catch {}
+  // A leading reasoning block can hold unbalanced braces (`if (x) {`) or a
+  // draft object, so try the answer that follows it before scanning the rest.
+  const afterReasoning = textAfterLeadingReasoningBlock(text);
   if (afterReasoning !== null) {
     const parsed = extractJsonCandidate(afterReasoning);
     if (parsed !== null) {
@@ -18,12 +23,18 @@ export function extractJson(text: string): unknown | null {
   return extractJsonCandidate(text);
 }
 
-function textAfterReasoningBlock(text: string): string | null {
-  let end = -1;
-  for (const match of text.matchAll(REASONING_BLOCK_CLOSE)) {
-    end = match.index + match[0].length;
+// Only a block that *starts* the text is treated as reasoning, and it ends at
+// its first matching close tag: a `</think>` anywhere else is answer content.
+function textAfterLeadingReasoningBlock(text: string): string | null {
+  const open = LEADING_REASONING_OPEN.exec(text);
+  const tag = open?.[1];
+  if (open === null || tag === undefined) {
+    return null;
   }
-  return end === -1 ? null : text.slice(end);
+  const close = new RegExp(`</${tag}\\s*>`, "giu");
+  close.lastIndex = open[0].length;
+  const match = close.exec(text);
+  return match === null ? null : text.slice(match.index + match[0].length);
 }
 
 function extractJsonCandidate(text: string): unknown | null {

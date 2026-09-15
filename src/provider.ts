@@ -158,6 +158,12 @@ export type ProviderOptions = {
    * Unset or null = no capture.
    */
   diagnosticsDir?: string | null;
+  /**
+   * Epoch ms when the first attempt of this logical call started. A provider
+   * with a timeout counts it from here, so a retry shares the first attempt's
+   * budget instead of getting a fresh one. Unset = this attempt starts it.
+   */
+  callStartedAt?: number;
 };
 
 /**
@@ -1520,11 +1526,14 @@ function piTimeoutMs(): number {
 //
 // An unusable reply — cut off at the output limit (finish_reason=length),
 // empty, or not parseable JSON — is reported as its own provider-failure
-// (exit 4, unchanged) carrying finish_reason and token usage, and is marked
-// retryable so the review loop retries it within CLAWPATCH_REVIEW_RETRIES.
-// The full raw response body is saved under <state-dir>/provider-failures/
-// (the error message names the file), because the error text only has room
-// for a short preview.
+// (exit 4, unchanged) carrying finish_reason and token usage. Empty and
+// unparseable replies are retryable within CLAWPATCH_REVIEW_RETRIES; a
+// truncated one is not (the same prompt against the same cap truncates
+// again). CLAWPATCH_GATEWAY_TIMEOUT_MS bounds the whole call, retries
+// included, and a retry is only offered when the time left covers another
+// attempt as long as the failed one. The full raw response body is saved
+// under <state-dir>/provider-failures/ (the error message names the file),
+// because the error text only has room for a short preview.
 
 const GATEWAY_DEFAULT_BASE_URL = "https://api.proto-labs.ai/v1";
 const GATEWAY_DEFAULT_MODEL = "protolabs/smart";
@@ -1575,13 +1584,27 @@ function gatewayConfig(options: ProviderOptions): GatewayConfig {
 // Opt-in output budget. Unset by default on purpose: a fixed default can make
 // a large prompt overflow the model's context window (prompt + max_tokens >
 // window) and turn a working review into an HTTP 400.
+// Invalid CLAWPATCH_GATEWAY_MAX_TOKENS values already warned about (once each).
+const warnedGatewayMaxTokens = new Set<string>();
+
 function gatewayMaxTokens(): number | null {
   const raw = process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"];
   if (raw === undefined || raw.trim() === "") {
     return null;
   }
   const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  if (Number.isInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+  // A typo must not silently drop the budget the operator asked for.
+  if (!warnedGatewayMaxTokens.has(raw)) {
+    warnedGatewayMaxTokens.add(raw);
+    process.stderr.write(
+      `warning: ignoring CLAWPATCH_GATEWAY_MAX_TOKENS=${JSON.stringify(raw)} ` +
+        "(expected a positive integer); no max_tokens is sent\n",
+    );
+  }
+  return null;
 }
 
 function gatewayRequestBody(
@@ -1637,8 +1660,13 @@ async function runGatewayJson(
   const config = gatewayConfig(options);
   const body = gatewayRequestBody(prompt, config, schema, label);
 
+  // CLAWPATCH_GATEWAY_TIMEOUT_MS bounds the whole call, retries included. A
+  // caller that sizes its own budget from it — pr-reviewer SIGKILLs clawpatch
+  // 30 s past it — must never be overrun because a retry got a fresh timeout.
+  const attemptStartedAt = Date.now();
+  const deadline = (options.callStartedAt ?? attemptStartedAt) + config.timeoutMs;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), Math.max(0, deadline - attemptStartedAt));
   let response: Response;
   let rawBody: string;
   try {
@@ -1656,7 +1684,11 @@ async function runGatewayJson(
     // rather than a stray SyntaxError.
     rawBody = await response.text();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = controller.signal.aborted
+      ? `no reply within the ${config.timeoutMs}ms gateway timeout`
+      : err instanceof Error
+        ? err.message
+        : String(err);
     throw new ClawpatchError(`gateway ${label}: request failed (${msg})`, 4, "provider-failure");
   } finally {
     clearTimeout(timer);
@@ -1676,6 +1708,12 @@ async function runGatewayJson(
     if (!(error instanceof ClawpatchError)) {
       throw error;
     }
+    // Offer a retry only when the time left under the deadline covers another
+    // attempt as long as this one (on a first attempt: it used at most half
+    // the timeout). Otherwise the retry would be cut off and bury this
+    // failure's diagnostics under a timeout.
+    const attemptMs = Date.now() - attemptStartedAt;
+    const retryable = error.retryable && deadline - Date.now() >= attemptMs;
     const capturePath = await captureGatewayFailure(options.diagnosticsDir, {
       label,
       error: error.message,
@@ -1685,24 +1723,29 @@ async function runGatewayJson(
       maxTokens: config.maxTokens,
       promptChars: prompt.length,
       httpStatus: response.status,
+      attemptMs,
       rawBody,
     });
-    if (capturePath === null) {
-      throw error;
-    }
-    throw new ClawpatchError(
-      `${error.message} — full response: ${capturePath}`,
-      error.exitCode,
-      error.code,
-      { retryable: error.retryable },
-    );
+    const message =
+      capturePath === null ? error.message : withCapturePath(error.message, label, capturePath);
+    throw new ClawpatchError(message, error.exitCode, error.code, { retryable });
   }
 }
 
+// The saved-file path goes first and the failure class plus its facts last:
+// callers that keep only the tail of stderr (pr-reviewer keeps 400 chars)
+// must still see what failed, however long the state-dir path is.
+function withCapturePath(message: string, label: string, capturePath: string): string {
+  const prefix = `gateway ${label}: `;
+  const detail = message.startsWith(prefix) ? message.slice(prefix.length) : message;
+  return `${prefix}full response saved to ${capturePath} — ${detail}`;
+}
+
 // Turn a 2xx chat-completions body into the model's JSON answer, or throw a
-// provider-failure that says *why* the reply is unusable. Every unusable-reply
-// failure is retryable: sampling differs per attempt, so a reply that ran into
-// the output limit or broke its JSON can come back whole on the next one.
+// provider-failure that says *why* the reply is unusable. Empty, unparseable
+// and non-JSON replies are marked retryable (sampling differs per attempt);
+// a reply cut off at the output limit is not, because the same prompt
+// against the same cap is cut off again.
 function parseGatewayResponse(rawBody: string, label: string, maxTokens: number | null): unknown {
   let payload: GatewayPayload;
   try {
@@ -1747,7 +1790,6 @@ function parseGatewayResponse(rawBody: string, label: string, maxTokens: number 
       `gateway ${label}: response truncated at the output limit (${facts})`,
       4,
       "provider-failure",
-      { retryable: true },
     );
   }
   if (content.trim().length === 0) {

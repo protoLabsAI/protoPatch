@@ -277,6 +277,32 @@ describe("runProviderReviewWithRetry", () => {
     expect(review).toHaveBeenCalledTimes(1);
   });
 
+  it("passes every attempt the first attempt's start as callStartedAt", async () => {
+    delete process.env["CLAWPATCH_REVIEW_RETRIES"];
+    const review = vi
+      .fn()
+      .mockRejectedValueOnce(new ClawpatchError("garbled", 8, "malformed-output"))
+      .mockResolvedValueOnce(emptyReview());
+    const before = Date.now();
+    await runProviderReviewWithRetry({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      provider: fakeProvider(review) as any,
+      root: "/tmp",
+      prompt: "hi",
+      options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      context: QUIET_CONTEXT,
+      featureId: "feat_x",
+      index: 0,
+      total: 1,
+    });
+    const starts = review.mock.calls.map(
+      (call) => (call[2] as { callStartedAt?: number }).callStartedAt,
+    );
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toBeGreaterThanOrEqual(before);
+    expect(starts[1]).toBe(starts[0]);
+  });
+
   it("re-throws after maxAttempts when malformed-output persists", async () => {
     process.env["CLAWPATCH_REVIEW_RETRIES"] = "1";
     const err = new ClawpatchError("garbled", 8, "malformed-output");
@@ -366,14 +392,20 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
     }
   });
 
-  it("retries a truncated reply and returns the next attempt's findings", async () => {
+  it("does not retry a truncated reply (the same cap would cut it off again)", async () => {
     const fetchMock = stubGatewayFetch(
       gatewayReply(CLEAN.slice(0, 20), "length"),
       gatewayReply(CLEAN, "stop"),
     );
-    const result = await run();
-    expect(result.inspected.notes).toEqual(["ok"]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const error = await run().then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ClawpatchError);
+    expect((error as ClawpatchError).exitCode).toBe(4);
+    expect((error as ClawpatchError).code).toBe("provider-failure");
+    expect((error as ClawpatchError).message).toContain("response truncated at the output limit");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("retries an unparseable reply the same way", async () => {
@@ -388,7 +420,7 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
 
   it("keeps exit 4 / provider-failure when the retry budget is exhausted", async () => {
     process.env["CLAWPATCH_REVIEW_RETRIES"] = "1";
-    const fetchMock = stubGatewayFetch(gatewayReply(CLEAN.slice(0, 20), "length"));
+    const fetchMock = stubGatewayFetch(gatewayReply("{ not json at all", "stop"));
     const error = await run().then(
       () => null,
       (caught: unknown) => caught,
@@ -396,17 +428,17 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
     expect(error).toBeInstanceOf(ClawpatchError);
     expect((error as ClawpatchError).exitCode).toBe(4);
     expect((error as ClawpatchError).code).toBe("provider-failure");
-    expect((error as ClawpatchError).message).toContain("response truncated at the output limit");
+    expect((error as ClawpatchError).message).toContain("response was not parseable JSON");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("does not retry when CLAWPATCH_REVIEW_RETRIES=0", async () => {
     process.env["CLAWPATCH_REVIEW_RETRIES"] = "0";
     const fetchMock = stubGatewayFetch(
-      gatewayReply(CLEAN.slice(0, 20), "length"),
+      gatewayReply("{ not json at all", "stop"),
       gatewayReply(CLEAN, "stop"),
     );
-    await expect(run()).rejects.toThrow("response truncated at the output limit");
+    await expect(run()).rejects.toThrow("response was not parseable JSON");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

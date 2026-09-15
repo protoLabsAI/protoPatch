@@ -830,10 +830,14 @@ async function runProviderReviewWithRetry(args: {
   const { provider, root, prompt, options, context, featureId, index, total, limiter } = args;
   const maxAttempts = 1 + reviewRetries();
   let lastError: unknown;
+  // Every attempt shares the first one's start, so a provider's timeout bounds
+  // the whole call — a retry never gets a fresh budget of its own.
+  let callStartedAt: number | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await limiter?.acquire();
-      return await provider.review(root, prompt, options);
+      callStartedAt ??= Date.now();
+      return await provider.review(root, prompt, { ...options, callStartedAt });
     } catch (error: unknown) {
       lastError = error;
       if (!isRetryableReviewError(error) || attempt === maxAttempts) {
