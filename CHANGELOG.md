@@ -8,6 +8,38 @@ to make our releases unambiguous against upstream. The CLI binary stays as
 `clawpatch` for downstream compatibility; `protopatch` is also installed as
 an alias for explicitness.
 
+## 0.6.2 - Unreleased (protoLabs fork)
+
+- **provider(gateway)**: an unusable model reply is reported for what it is.
+  A reply cut off at the output limit (`finish_reason: "length"`) fails with
+  `response truncated at the output limit` instead of
+  `response was not parseable JSON`, and every unusable-reply error carries
+  `finish_reason` and token usage (`completion_tokens`, `reasoning_tokens`,
+  `prompt_tokens`). Exit code (`4`) and error class (`provider-failure`) are
+  unchanged.
+- **provider(gateway)**: empty and unparseable replies are retried within
+  `CLAWPATCH_REVIEW_RETRIES`; before this, a gateway failure was never
+  retried. A truncated reply is not retried (the same cap cuts it off again).
+  `CLAWPATCH_GATEWAY_TIMEOUT_MS` now bounds a review call with its retries,
+  and a retry is only made when the time left covers another attempt as long
+  as the failed one, so a caller that sizes its budget from the timeout is
+  never overrun by a retry.
+- **provider(gateway)**: a reply of the wrong shape (exit `8`) follows the
+  same time rule, and a retry cut off by the deadline reports the failure that
+  prompted it (its own class and exit code) rather than the timeout.
+- **provider(gateway)**: the full raw response of a failed reply is saved to
+  `<state-dir>/provider-failures/` (newest 20 kept). The error names the file
+  first and ends with the failure and its figures, so both survive a caller
+  that keeps only the tail of stderr.
+- **provider(gateway)**: new `CLAWPATCH_GATEWAY_MAX_TOKENS` sends an explicit
+  `max_tokens`. Unset by default, so request bodies are unchanged; an invalid
+  value is ignored with a warning.
+- **provider(gateway)**: a 2xx body that is not JSON is a `provider-failure`
+  (exit `4`) instead of an uncaught `SyntaxError`.
+- **provider**: `extractJson` looks past a `<think>…</think>` block that
+  starts the reply, so a reasoning preamble with a stray `{` no longer hides
+  valid JSON. A reply that is valid JSON as a whole is always taken as-is.
+
 ## 0.6.1 - Unreleased (protoLabs fork)
 
 - **provider**: added `proto` — drives the protoCLI agent

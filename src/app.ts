@@ -151,7 +151,7 @@ export async function mapCommand(
   const result = await mapWithSource(loaded.root, loaded.project, existing, heuristic, {
     source,
     provider,
-    providerOptions: providerOptions(config),
+    providerOptions: providerOptions(config, loaded.paths.stateDir),
     inventory: filters,
     onProgress: (event, fields) => {
       emitProgress(context, "map", event, fields);
@@ -707,7 +707,7 @@ async function reviewFeature(
       provider,
       root: loaded.root,
       prompt: reviewPrompt.prompt,
-      options: providerOptions(config),
+      options: providerOptions(config, loaded.paths.stateDir),
       context,
       featureId: feature.featureId,
       index,
@@ -830,11 +830,26 @@ async function runProviderReviewWithRetry(args: {
   const { provider, root, prompt, options, context, featureId, index, total, limiter } = args;
   const maxAttempts = 1 + reviewRetries();
   let lastError: unknown;
+  // Every attempt shares the first one's start, so a provider's timeout bounds
+  // the whole call — a retry never gets a fresh budget of its own.
+  let callStartedAt: number | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await limiter?.acquire();
-      return await provider.review(root, prompt, options);
+      callStartedAt ??= Date.now();
+      return await provider.review(root, prompt, { ...options, callStartedAt });
     } catch (error: unknown) {
+      // A retry cut off by the call's shared deadline has nothing new to say:
+      // report the failure that prompted the retry — its own class and exit
+      // code — instead of the timeout.
+      if (
+        attempt > 1 &&
+        lastError !== undefined &&
+        error instanceof ClawpatchError &&
+        error.deadlineExceeded
+      ) {
+        throw lastError;
+      }
       lastError = error;
       if (!isRetryableReviewError(error) || attempt === maxAttempts) {
         throw error;
@@ -860,8 +875,13 @@ function reviewRetries(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 1;
 }
 
+// Retry schema-level malformed output, plus any provider failure the provider
+// marked transient (e.g. a gateway reply that was empty or not parseable
+// JSON). A provider can also veto a retry (`retryable: false`), e.g. when no
+// time is left for another attempt. A retryable error keeps its exit code and
+// code, so an exhausted retry surfaces exactly as it did before retries.
 function isRetryableReviewError(error: unknown): boolean {
-  return error instanceof ClawpatchError && error.code === "malformed-output";
+  return error instanceof ClawpatchError && (error.retryable ?? error.code === "malformed-output");
 }
 
 export async function revalidateCommand(
@@ -896,7 +916,11 @@ export async function revalidateCommand(
         title: finding.title,
       });
       const prompt = await buildRevalidatePrompt(loaded.root, JSON.stringify(finding, null, 2));
-      const output = await provider.revalidate(loaded.root, prompt, providerOptions(config));
+      const output = await provider.revalidate(
+        loaded.root,
+        prompt,
+        providerOptions(config, loaded.paths.stateDir),
+      );
       const updated = appendFindingHistory(
         {
           ...finding,
@@ -1047,7 +1071,7 @@ export async function fixCommand(
     (await sourceChangedSnapshots(loaded.root, loaded.paths.stateDir)) ?? new Map();
   let plan: FixPlanOutput;
   try {
-    plan = await provider.fix(loaded.root, prompt, providerOptions(config));
+    plan = await provider.fix(loaded.root, prompt, providerOptions(config, loaded.paths.stateDir));
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     await writePatchAttempt(loaded.paths, {
@@ -1898,11 +1922,12 @@ function normalizeDarwinPrivateVar(path: string): string {
   return normalizePath(path).replace(/^\/private\/var\//u, "/var/");
 }
 
-function providerOptions(config: ReturnType<typeof applyProviderFlags>) {
+function providerOptions(config: ReturnType<typeof applyProviderFlags>, stateDir: string) {
   return {
     model: config.provider.model,
     reasoningEffort: config.provider.reasoningEffort,
     skipGitRepoCheck: config.provider.skipGitRepoCheck,
+    diagnosticsDir: join(stateDir, "provider-failures"),
   };
 }
 

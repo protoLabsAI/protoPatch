@@ -1,6 +1,43 @@
 import { ClawpatchError } from "./errors.js";
 
+// Opening tag of an inline reasoning block (`<think>…</think>` and friends)
+// that a reasoning model puts at the very start of `content` when the server
+// has no reasoning parser configured.
+const LEADING_REASONING_OPEN = /^\s*<(think|thinking|reasoning)>/iu;
+
 export function extractJson(text: string): unknown | null {
+  // A reply that is valid JSON as a whole is the answer, whatever its strings
+  // quote — a finding can mention `</think>` followed by a `{}` literal.
+  try {
+    return JSON.parse(text);
+  } catch {}
+  // A leading reasoning block can hold unbalanced braces (`if (x) {`) or a
+  // draft object, so try the answer that follows it before scanning the rest.
+  const afterReasoning = textAfterLeadingReasoningBlock(text);
+  if (afterReasoning !== null) {
+    const parsed = extractJsonCandidate(afterReasoning);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return extractJsonCandidate(text);
+}
+
+// Only a block that *starts* the text is treated as reasoning, and it ends at
+// its first matching close tag: a `</think>` anywhere else is answer content.
+function textAfterLeadingReasoningBlock(text: string): string | null {
+  const open = LEADING_REASONING_OPEN.exec(text);
+  const tag = open?.[1];
+  if (open === null || tag === undefined) {
+    return null;
+  }
+  const close = new RegExp(`</${tag}\\s*>`, "giu");
+  close.lastIndex = open[0].length;
+  const match = close.exec(text);
+  return match === null ? null : text.slice(match.index + match[0].length);
+}
+
+function extractJsonCandidate(text: string): unknown | null {
   try {
     return JSON.parse(text);
   } catch {}

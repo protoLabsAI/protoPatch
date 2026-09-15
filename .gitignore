@@ -6,6 +6,7 @@ coverage/
 .clawpatch/patches/
 .clawpatch/reports/
 .clawpatch/locks/
+.clawpatch/provider-failures/
 
 # protoLabs workspace-config standard
 .beads/beads.db
