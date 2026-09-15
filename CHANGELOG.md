@@ -8,6 +8,29 @@ to make our releases unambiguous against upstream. The CLI binary stays as
 `clawpatch` for downstream compatibility; `protopatch` is also installed as
 an alias for explicitness.
 
+## Unreleased
+
+- **provider(gateway)**: an unusable model reply is now reported for what it
+  is, and retried. A reply cut off at the output limit
+  (`finish_reason: "length"`) fails with `response truncated at the output
+limit` instead of `response was not parseable JSON`, and every
+  unusable-reply error carries `finish_reason` and token usage
+  (`completion_tokens`, `reasoning_tokens`, `prompt_tokens`). Truncated,
+  empty, and unparseable replies are retried within
+  `CLAWPATCH_REVIEW_RETRIES`; before this, a gateway failure was never
+  retried. Exit code (`4`) and error class (`provider-failure`) are
+  unchanged.
+- **provider(gateway)**: the full raw response of a failed reply is saved to
+  `<state-dir>/provider-failures/` (newest 20 kept), and the error names the
+  file.
+- **provider(gateway)**: new `CLAWPATCH_GATEWAY_MAX_TOKENS` sends an explicit
+  `max_tokens`. Unset by default, so request bodies are unchanged.
+- **provider(gateway)**: a 2xx body that is not JSON is a `provider-failure`
+  (exit `4`) instead of an uncaught `SyntaxError`.
+- **provider**: `extractJson` prefers the answer after an inline
+  `<think>…</think>` block, so a reasoning preamble with a stray `{` no
+  longer hides valid JSON.
+
 ## 0.6.1 - Unreleased (protoLabs fork)
 
 - **provider**: added `proto` — drives the protoCLI agent

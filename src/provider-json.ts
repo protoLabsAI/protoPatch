@@ -1,6 +1,32 @@
 import { ClawpatchError } from "./errors.js";
 
+// Closing tag of an inline reasoning block (`<think>…</think>` and friends),
+// which reasoning models emit in `content` when the server has no reasoning
+// parser configured.
+const REASONING_BLOCK_CLOSE = /<\/(?:think|thinking|reasoning)>/giu;
+
 export function extractJson(text: string): unknown | null {
+  // A reasoning preamble can hold unbalanced braces (`if (x) {`) or a draft
+  // object, so try the answer that follows the last closing tag first.
+  const afterReasoning = textAfterReasoningBlock(text);
+  if (afterReasoning !== null) {
+    const parsed = extractJsonCandidate(afterReasoning);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return extractJsonCandidate(text);
+}
+
+function textAfterReasoningBlock(text: string): string | null {
+  let end = -1;
+  for (const match of text.matchAll(REASONING_BLOCK_CLOSE)) {
+    end = match.index + match[0].length;
+  }
+  return end === -1 ? null : text.slice(end);
+}
+
+function extractJsonCandidate(text: string): unknown | null {
   try {
     return JSON.parse(text);
   } catch {}

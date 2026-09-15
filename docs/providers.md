@@ -426,13 +426,35 @@ Or set the provider once in `.clawpatch/config.json`:
 
 ### Environment
 
-| Variable                                                            | Default                        | Notes                                                                                    |
-| ------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------- | ------ | ---- | ------ | ------- | -------------------------------------------------------------------- |
-| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY`                   | required                       | Bearer token. The gateway provider refuses to start without one.                         |
-| `OPENAI_BASE_URL`                                                   | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped.                                                           |
-| `CLAWPATCH_GATEWAY_MODEL`                                           | `protolabs/smart`              | `--model` on the CLI overrides.                                                          |
-| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)               | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
-| `--reasoning-effort none                                            | minimal                        | low                                                                                      | medium | high | xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
+| Variable                                                            | Default                        | Notes                                                                                                                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ------ | ------- | -------------------------------------------------------------------- |
+| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY`                   | required                       | Bearer token. The gateway provider refuses to start without one.                                                                                                                          |
+| `OPENAI_BASE_URL`                                                   | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped.                                                                                                                                                            |
+| `CLAWPATCH_GATEWAY_MODEL`                                           | `protolabs/smart`              | `--model` on the CLI overrides.                                                                                                                                                           |
+| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)               | Reasoning models on large features can be slow; raise this if you see frequent timeouts.                                                                                                  |
+| `CLAWPATCH_GATEWAY_MAX_TOKENS`                                      | unset                          | Sent as `max_tokens` when set to a positive integer. Unset sends none, so the backend's own output budget applies (a fixed cap could push prompt + output past a model's context window). |
+| `--reasoning-effort none                                            | minimal                        | low                                                                                                                                                                                       | medium | high | xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
+
+### Failure handling
+
+A reply the gateway provider cannot use fails the call with exit `4`
+(`provider-failure`, unchanged), and the message names the failure:
+
+- `response truncated at the output limit` — the reply stopped with
+  `finish_reason: "length"`. The message carries `completion_tokens`,
+  `reasoning_tokens`, and `prompt_tokens` when the gateway reports them, so a
+  length cap (large `completion_tokens`) can be told apart from reasoning that
+  used up the budget (large `reasoning_tokens`, little or no content).
+- `empty choices[0].message.content in response`.
+- `response was not parseable JSON` — with `finish_reason=stop` this means the
+  backend did not enforce the JSON schema.
+
+During `review` / `ci` these failures are retried within
+`CLAWPATCH_REVIEW_RETRIES` (default `1`). Each one also saves the full raw
+response body to `<state-dir>/provider-failures/` (the newest 20 are kept), and
+the error message ends with that file's path. JSON wrapped in a markdown fence,
+surrounded by prose, or following an inline `<think>…</think>` block is
+accepted as-is.
 
 ### Why this can be the minimal provider
 

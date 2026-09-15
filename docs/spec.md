@@ -114,7 +114,8 @@ Exit codes:
 - `1`: runtime failure.
 - `2`: invalid usage or config.
 - `3`: dirty worktree blocks requested operation.
-- `4`: provider auth/config failure.
+- `4`: provider auth/config failure, or a failed provider call (HTTP error, or an
+  unusable gateway reply: truncated, empty, or not parseable JSON).
 - `5`: provider quota/rate-limit failure.
 - `6`: tests/validation failed.
 - `7`: lock conflict.

@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClawpatchError } from "./errors.js";
 import { __testing, extractJson, providerByName } from "./provider.js";
 import { safeProviderPreview } from "./provider-json.js";
 import { agentMapJsonSchema, reviewJsonSchema } from "./provider-schema.js";
 import { evidenceRefSchema, revalidateOutputSchema, reviewOutputSchema } from "./types.js";
+import { fixtureRoot } from "./test-helpers.js";
 
 // eslint-disable-next-line no-underscore-dangle
 const {
@@ -2085,5 +2088,303 @@ describe("buildAcpxJsonArgs", () => {
     expect(modelIdx).toBeGreaterThanOrEqual(0);
     expect(args[modelIdx + 1]).toBe("opus");
     expect(args).toContain("gamma");
+  });
+});
+
+describe("extractJson reasoning blocks", () => {
+  it("prefers the answer after a <think> block that holds unbalanced braces", () => {
+    const input =
+      '<think>the handler `if (x) {` never closes, and the "main" path is fine</think>\n' +
+      '{"outcome":"fixed","reasoning":"ok","commands":[]}';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  it("prefers the final answer over a draft object inside the reasoning block", () => {
+    const input =
+      '<think>draft: {"outcome":"draft","reasoning":"x","commands":[]}</think>' +
+      '```json\n{"outcome":"fixed","reasoning":"ok","commands":[]}\n```';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  it("falls back to the whole text when nothing parses after the block", () => {
+    const input = '{"outcome":"fixed","reasoning":"ok","commands":[]}</think> trailing words';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+});
+
+function chatReply(
+  content: string,
+  finishReason: string | null = "stop",
+  extra: Record<string, unknown> = {},
+  message: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "chatcmpl-test",
+    object: "chat.completion",
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason,
+        message: { role: "assistant", content, ...message },
+      },
+    ],
+    ...extra,
+  };
+}
+
+// Each call to the stubbed fetch answers with the next body (the last one
+// repeats). Returns the mock so tests can inspect what was sent.
+function stubGateway(...bodies: Array<string | Record<string, unknown>>) {
+  const queue = [...bodies];
+  const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    const text = typeof next === "string" ? next : JSON.stringify(next);
+    return new Response(text, { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function sentBody(fetchMock: ReturnType<typeof stubGateway>, call = 0): Record<string, unknown> {
+  const init = fetchMock.mock.calls[call]?.[1];
+  return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+function gatewayReviewOptions(dir: string | null) {
+  return { model: null, reasoningEffort: null, skipGitRepoCheck: false, diagnosticsDir: dir };
+}
+
+function capturePathFrom(error: ClawpatchError): string {
+  const match = error.message.match(/— full response: (.+)$/u);
+  if (!match?.[1]) throw new Error(`no capture path in: ${error.message}`);
+  return match[1];
+}
+
+describe("gateway provider replies", () => {
+  const ENV_KEYS = [
+    "GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAWPATCH_GATEWAY_MODEL",
+    "CLAWPATCH_GATEWAY_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+    "CLAWPATCH_GATEWAY_MAX_TOKENS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+  let diagnosticsDir: string;
+
+  beforeEach(async () => {
+    for (const k of ENV_KEYS) {
+      snapshot[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env["GATEWAY_API_KEY"] = "test-secret-key";
+    process.env["OPENAI_BASE_URL"] = "https://gateway.test/v1";
+    diagnosticsDir = join(await fixtureRoot("clawpatch-gateway-diag-"), "provider-failures");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  const REVIEW_JSON = JSON.stringify({
+    findings: [
+      {
+        title: "repairAddressedTurnEcho leaves authored bubble unstamped when echo is dropped",
+        category: "bug",
+        severity: "medium",
+        confidence: "medium",
+        evidence: [{ path: "src/chat.ts", startLine: 10, endLine: 12, symbol: null, quote: null }],
+        reasoning: "The echo branch returns before stamping the bubble.",
+        reproduction: null,
+        recommendation: "Stamp the bubble before returning.",
+        whyTestsDoNotAlreadyCoverThis: "No test drops the echo.",
+        suggestedRegressionTest: null,
+        minimumFixScope: "src/chat.ts",
+      },
+    ],
+    inspected: { files: ["src/chat.ts"], symbols: [], notes: [] },
+  });
+
+  async function reviewError(dir: string | null = diagnosticsDir): Promise<ClawpatchError> {
+    try {
+      await providerByName("gateway").review("/tmp", "review this", gatewayReviewOptions(dir));
+    } catch (error: unknown) {
+      if (error instanceof ClawpatchError) return error;
+      throw error;
+    }
+    throw new Error("expected the gateway review to fail");
+  }
+
+  it("parses a clean structured reply and sends no max_tokens by default", async () => {
+    const fetchMock = stubGateway(chatReply(REVIEW_JSON));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+    const body = sentBody(fetchMock);
+    expect(body).not.toHaveProperty("max_tokens");
+    expect(body).not.toHaveProperty("max_completion_tokens");
+    expect(body["response_format"]).toMatchObject({ type: "json_schema" });
+  });
+
+  it.each([
+    ["a json fence", "```json\n" + REVIEW_JSON + "\n```"],
+    ["leading and trailing prose", `Here is the review:\n${REVIEW_JSON}\nHope this helps.`],
+    ["a <think> block with a stray brace", `<think>if (x) { is unclosed</think>${REVIEW_JSON}`],
+  ])("accepts a reply wrapped in %s", async (_label, content) => {
+    stubGateway(chatReply(content));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+  });
+
+  it("reports a reply cut off at the output limit as a retryable truncation", async () => {
+    stubGateway(
+      chatReply(REVIEW_JSON.slice(0, 180), "length", {
+        usage: {
+          prompt_tokens: 91234,
+          completion_tokens: 32000,
+          completion_tokens_details: { reasoning_tokens: 12000 },
+        },
+      }),
+    );
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(true);
+    expect(error.message).toContain("gateway review: response truncated at the output limit");
+    expect(error.message).not.toContain("not parseable");
+    expect(error.message).toContain("finish_reason=length");
+    expect(error.message).toContain("completion_tokens=32000");
+    expect(error.message).toContain("reasoning_tokens=12000");
+    expect(error.message).toContain("prompt_tokens=91234");
+    expect(error.message).toContain("max_tokens=unset");
+    // no content excerpt: the failure class must stay inside a short stderr tail
+    expect(error.message).not.toContain("tail=");
+  });
+
+  it("reports reasoning that consumed the whole output budget as truncation", async () => {
+    stubGateway(
+      chatReply(
+        "",
+        "length",
+        {
+          usage: {
+            completion_tokens: 32000,
+            completion_tokens_details: { reasoning_tokens: 32000 },
+          },
+        },
+        { reasoning_content: "x".repeat(500) },
+      ),
+    );
+    const error = await reviewError();
+    expect(error.message).toContain("response truncated at the output limit");
+    expect(error.message).toContain("content_chars=0");
+    expect(error.message).toContain("reasoning_chars=500");
+    expect(error.retryable).toBe(true);
+  });
+
+  it("keeps a complete answer even when finish_reason is length", async () => {
+    stubGateway(chatReply(REVIEW_JSON, "length"));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+  });
+
+  it("reports broken JSON with finish_reason and saves the full raw response", async () => {
+    const broken = `${REVIEW_JSON.slice(0, 150)} ${"filler ".repeat(200)}]]`;
+    const reply = chatReply(broken, "stop", { usage: { completion_tokens: 900 } });
+    stubGateway(reply);
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(true);
+    expect(error.message).toContain("gateway review: response was not parseable JSON");
+    expect(error.message).toContain("finish_reason=stop");
+    expect(error.message).toContain(`content_chars=${broken.length}`);
+    // the tail shows where the JSON broke, not the uninformative head
+    expect(error.message).toContain("tail=…");
+    expect(error.message).toContain("filler ]]");
+
+    const capturePath = capturePathFrom(error);
+    expect(capturePath.startsWith(diagnosticsDir)).toBe(true);
+    const saved = await readFile(capturePath, "utf8");
+    const record = JSON.parse(saved) as Record<string, unknown>;
+    expect(record["rawBody"]).toBe(JSON.stringify(reply));
+    expect(record["label"]).toBe("review");
+    expect(record["model"]).toBe("protolabs/smart");
+    expect(record["httpStatus"]).toBe(200);
+    expect(record["promptChars"]).toBe("review this".length);
+    expect(saved).not.toContain("test-secret-key");
+  });
+
+  it("does not write a capture when no diagnostics dir is configured", async () => {
+    stubGateway(chatReply("definitely not json", "stop"));
+    const error = await reviewError(null);
+    expect(error.message).toContain("response was not parseable JSON");
+    expect(error.message).not.toContain("full response:");
+    await expect(readdir(diagnosticsDir)).rejects.toThrow();
+  });
+
+  it("prunes captures to the newest 20 and leaves unrelated files alone", async () => {
+    await mkdir(diagnosticsDir, { recursive: true });
+    for (let i = 0; i < 22; i += 1) {
+      const name = `20200101T0000000${String(i).padStart(2, "0")}Z-gateway-review-0000000${i % 10}.json`;
+      await writeFile(join(diagnosticsDir, name), "{}\n", "utf8");
+    }
+    await writeFile(join(diagnosticsDir, "notes.txt"), "keep me\n", "utf8");
+    stubGateway(chatReply("not json", "stop"));
+    const error = await reviewError();
+    const entries = await readdir(diagnosticsDir);
+    const captures = entries.filter((name) => name.includes("-gateway-"));
+    expect(captures).toHaveLength(20);
+    expect(entries).toContain("notes.txt");
+    expect(captures).toContain(capturePathFrom(error).slice(diagnosticsDir.length + 1));
+    expect(captures.some((name) => name.startsWith("20200101T000000000Z"))).toBe(false);
+  });
+
+  it("sends max_tokens only when CLAWPATCH_GATEWAY_MAX_TOKENS is a positive integer", async () => {
+    process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = "48000";
+    const fetchMock = stubGateway(chatReply(REVIEW_JSON.slice(0, 50), "length"));
+    const error = await reviewError();
+    expect(sentBody(fetchMock)["max_tokens"]).toBe(48000);
+    expect(error.message).toContain("max_tokens=48000");
+
+    for (const garbage of ["", "abc", "0", "-5", "1.5"]) {
+      process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = garbage;
+      // eslint-disable-next-line no-underscore-dangle
+      expect(__testing.gatewayConfig(gatewayReviewOptions(diagnosticsDir)).maxTokens).toBeNull();
+    }
+  });
+
+  it("treats a 200 body that is not JSON as a retryable provider-failure", async () => {
+    stubGateway("<html><body>502 Bad Gateway</body></html>");
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(true);
+    expect(error.message).toContain("gateway review: response body was not JSON");
+  });
+
+  it("keeps an API error in the body non-retryable", async () => {
+    stubGateway({ error: { message: "model not found" } });
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(false);
+    expect(error.message).toContain("gateway review: API error — model not found");
   });
 });

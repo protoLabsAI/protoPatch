@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __testing as appTesting, AppContext } from "./app.js";
 import { ClawpatchError } from "./errors.js";
+import { providerByName } from "./provider.js";
 import type { ReviewOutput } from "./types.js";
 
 // eslint-disable-next-line no-underscore-dangle
@@ -67,6 +68,14 @@ describe("isRetryableReviewError", () => {
 
   it("returns false for provider-failure (acpx-layer handles those)", () => {
     expect(isRetryableReviewError(new ClawpatchError("nope", 1, "provider-failure"))).toBe(false);
+  });
+
+  it("returns true for a provider-failure the provider marked retryable", () => {
+    const error = new ClawpatchError("truncated", 4, "provider-failure", { retryable: true });
+    expect(isRetryableReviewError(error)).toBe(true);
+    // retryability never changes the exit-code / error-class contract
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
   });
 
   it("returns false for plain Error", () => {
@@ -288,5 +297,116 @@ describe("runProviderReviewWithRetry", () => {
       }),
     ).rejects.toBe(err);
     expect(review).toHaveBeenCalledTimes(2);
+  });
+});
+
+function gatewayReply(content: string, finishReason: string): string {
+  return JSON.stringify({
+    choices: [{ index: 0, finish_reason: finishReason, message: { role: "assistant", content } }],
+    usage: { completion_tokens: 32000 },
+  });
+}
+
+function stubGatewayFetch(...bodies: string[]) {
+  const queue = [...bodies];
+  const fetchMock = vi.fn(async () => {
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    return new Response(next, { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+// End to end through the real gateway provider with fetch stubbed: an
+// unusable reply (truncated at the output limit) is retried within
+// CLAWPATCH_REVIEW_RETRIES, and an exhausted retry still exits 4 /
+// provider-failure — the contract pr-reviewer maps exit codes from.
+describe("runProviderReviewWithRetry with the gateway provider", () => {
+  const ENV_KEYS = [
+    "GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAWPATCH_GATEWAY_MAX_TOKENS",
+    "CLAWPATCH_REVIEW_RETRIES",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  const CLEAN = JSON.stringify({
+    findings: [],
+    inspected: { files: [], symbols: [], notes: ["ok"] },
+  });
+
+  function run() {
+    return runProviderReviewWithRetry({
+      provider: providerByName("gateway"),
+      root: "/tmp",
+      prompt: "review this",
+      options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      context: QUIET_CONTEXT,
+      featureId: "feat_x",
+      index: 0,
+      total: 1,
+    });
+  }
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) {
+      snapshot[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["OPENAI_BASE_URL"] = "https://gateway.test/v1";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  it("retries a truncated reply and returns the next attempt's findings", async () => {
+    const fetchMock = stubGatewayFetch(
+      gatewayReply(CLEAN.slice(0, 20), "length"),
+      gatewayReply(CLEAN, "stop"),
+    );
+    const result = await run();
+    expect(result.inspected.notes).toEqual(["ok"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries an unparseable reply the same way", async () => {
+    const fetchMock = stubGatewayFetch(
+      gatewayReply("{ not json at all", "stop"),
+      gatewayReply(CLEAN, "stop"),
+    );
+    const result = await run();
+    expect(result.findings).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps exit 4 / provider-failure when the retry budget is exhausted", async () => {
+    process.env["CLAWPATCH_REVIEW_RETRIES"] = "1";
+    const fetchMock = stubGatewayFetch(gatewayReply(CLEAN.slice(0, 20), "length"));
+    const error = await run().then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ClawpatchError);
+    expect((error as ClawpatchError).exitCode).toBe(4);
+    expect((error as ClawpatchError).code).toBe("provider-failure");
+    expect((error as ClawpatchError).message).toContain("response truncated at the output limit");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry when CLAWPATCH_REVIEW_RETRIES=0", async () => {
+    process.env["CLAWPATCH_REVIEW_RETRIES"] = "0";
+    const fetchMock = stubGatewayFetch(
+      gatewayReply(CLEAN.slice(0, 20), "length"),
+      gatewayReply(CLEAN, "stop"),
+    );
+    await expect(run()).rejects.toThrow("response truncated at the output limit");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

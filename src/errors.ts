@@ -1,12 +1,29 @@
+export type ClawpatchErrorOptions = {
+  /**
+   * Marks the failure as transient: the review loop may retry it within the
+   * `CLAWPATCH_REVIEW_RETRIES` budget. Retryability never changes `exitCode`
+   * or `code` — callers (e.g. pr-reviewer) key off those, so an error that
+   * exhausts its retries surfaces exactly as it would have without them.
+   */
+  retryable?: boolean;
+};
+
 export class ClawpatchError extends Error {
   public readonly exitCode: number;
   public readonly code: string;
+  public readonly retryable: boolean;
 
-  public constructor(message: string, exitCode = 1, code = "runtime") {
+  public constructor(
+    message: string,
+    exitCode = 1,
+    code = "runtime",
+    options: ClawpatchErrorOptions = {},
+  ) {
     super(message);
     this.name = "ClawpatchError";
     this.exitCode = exitCode;
     this.code = code;
+    this.retryable = options.retryable === true;
   }
 }
 
