@@ -10,6 +10,8 @@ an alias for explicitness.
 
 ## Unreleased
 
+## 0.6.2 - Unreleased (protoLabs fork)
+
 - **provider(gateway)**: an unusable model reply is now reported for what it
   is, and retried. A reply cut off at the output limit
   (`finish_reason: "length"`) fails with `response truncated at the output
