@@ -1684,12 +1684,15 @@ async function runGatewayJson(
     // rather than a stray SyntaxError.
     rawBody = await response.text();
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `no reply within the ${config.timeoutMs}ms gateway timeout`
+    const aborted = controller.signal.aborted;
+    const msg = aborted
+      ? gatewayTimeoutMessage(Math.max(0, deadline - attemptStartedAt), config.timeoutMs)
       : err instanceof Error
         ? err.message
         : String(err);
-    throw new ClawpatchError(`gateway ${label}: request failed (${msg})`, 4, "provider-failure");
+    throw new ClawpatchError(`gateway ${label}: request failed (${msg})`, 4, "provider-failure", {
+      deadlineExceeded: aborted,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -1708,12 +1711,9 @@ async function runGatewayJson(
     if (!(error instanceof ClawpatchError)) {
       throw error;
     }
-    // Offer a retry only when the time left under the deadline covers another
-    // attempt as long as this one (on a first attempt: it used at most half
-    // the timeout). Otherwise the retry would be cut off and bury this
-    // failure's diagnostics under a timeout.
     const attemptMs = Date.now() - attemptStartedAt;
-    const retryable = error.retryable && deadline - Date.now() >= attemptMs;
+    const retryable =
+      error.retryable === true && gatewayRetryFits(options, attemptStartedAt, config.timeoutMs);
     const capturePath = await captureGatewayFailure(options.diagnosticsDir, {
       label,
       error: error.message,
@@ -1730,6 +1730,28 @@ async function runGatewayJson(
       capturePath === null ? error.message : withCapturePath(error.message, label, capturePath);
     throw new ClawpatchError(message, error.exitCode, error.code, { retryable });
   }
+}
+
+// A retry is worth starting only when the time left under the call's shared
+// deadline covers another attempt as long as the one that just failed (on a
+// first attempt: it used at most half the timeout). Otherwise the retry would
+// be cut off, and its timeout would bury the failure that prompted it.
+function gatewayRetryFits(
+  options: ProviderOptions,
+  attemptStartedAt: number,
+  timeoutMs: number,
+): boolean {
+  const now = Date.now();
+  const deadline = (options.callStartedAt ?? attemptStartedAt) + timeoutMs;
+  return deadline - now >= now - attemptStartedAt;
+}
+
+// States the budget the attempt actually had: a retry only gets what is left
+// of the call's shared deadline.
+function gatewayTimeoutMessage(budgetMs: number, timeoutMs: number): string {
+  return budgetMs < timeoutMs
+    ? `no reply within the ${budgetMs}ms left of the ${timeoutMs}ms gateway timeout`
+    : `no reply within the ${timeoutMs}ms gateway timeout`;
 }
 
 // The saved-file path goes first and the failure class plus its facts last:
@@ -1917,8 +1939,22 @@ const gatewayProvider: Provider = {
     prompt: string,
     options: ProviderOptions,
   ): Promise<PartitionedReviewOutput> {
+    const attemptStartedAt = Date.now();
     const output = await runGatewayJson(prompt, options, reviewJsonSchema, "review");
-    return parseReviewOutput(output);
+    try {
+      return parseReviewOutput(output);
+    } catch (error: unknown) {
+      // A reply of the wrong shape (malformed-output) is retried by its code;
+      // hold it to the same rule as an unusable reply, so a retry that cannot
+      // fit the time left never buries it under a timeout.
+      if (
+        error instanceof ClawpatchError &&
+        !gatewayRetryFits(options, attemptStartedAt, gatewayConfig(options).timeoutMs)
+      ) {
+        throw new ClawpatchError(error.message, error.exitCode, error.code, { retryable: false });
+      }
+      throw error;
+    }
   },
   async fix(_root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
     const output = await runGatewayJson(prompt, options, fixPlanJsonSchema, "fix-plan");

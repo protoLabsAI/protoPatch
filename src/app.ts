@@ -839,6 +839,17 @@ async function runProviderReviewWithRetry(args: {
       callStartedAt ??= Date.now();
       return await provider.review(root, prompt, { ...options, callStartedAt });
     } catch (error: unknown) {
+      // A retry cut off by the call's shared deadline has nothing new to say:
+      // report the failure that prompted the retry — its own class and exit
+      // code — instead of the timeout.
+      if (
+        attempt > 1 &&
+        lastError !== undefined &&
+        error instanceof ClawpatchError &&
+        error.deadlineExceeded
+      ) {
+        throw lastError;
+      }
       lastError = error;
       if (!isRetryableReviewError(error) || attempt === maxAttempts) {
         throw error;
@@ -865,11 +876,12 @@ function reviewRetries(): number {
 }
 
 // Retry schema-level malformed output, plus any provider failure the provider
-// marked transient (e.g. a gateway reply that was truncated, empty, or not
-// parseable JSON). A retryable error keeps its exit code and code, so an
-// exhausted retry surfaces exactly as it did before retries applied to it.
+// marked transient (e.g. a gateway reply that was empty or not parseable
+// JSON). A provider can also veto a retry (`retryable: false`), e.g. when no
+// time is left for another attempt. A retryable error keeps its exit code and
+// code, so an exhausted retry surfaces exactly as it did before retries.
 function isRetryableReviewError(error: unknown): boolean {
-  return error instanceof ClawpatchError && (error.code === "malformed-output" || error.retryable);
+  return error instanceof ClawpatchError && (error.retryable ?? error.code === "malformed-output");
 }
 
 export async function revalidateCommand(

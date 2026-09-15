@@ -454,7 +454,9 @@ During `review` / `ci`, empty and unparseable replies are retried within
 the same prompt against the same cap is cut off again. The gateway timeout
 (`CLAWPATCH_GATEWAY_TIMEOUT_MS`) bounds the whole review call, retries
 included, and a retry is only made when the time left covers another attempt
-as long as the one that failed. A caller that sizes its own budget from the
+as long as the one that failed. The same rule holds for a reply of the wrong
+shape (exit `8`), and a retry cut off by the deadline reports the failure that
+prompted it, not the timeout. A caller that sizes its own budget from the
 timeout is therefore never overrun by a retry.
 
 Each of these failures also saves the full raw response body to

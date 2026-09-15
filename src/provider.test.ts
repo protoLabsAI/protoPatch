@@ -2480,6 +2480,22 @@ describe("gateway provider replies", () => {
     expect(error.retryable).toBe(true);
   });
 
+  it("vetoes a retry of a wrong-shape reply that used more than half the timeout", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "400";
+    stubSlowGateway(250, chatReply(JSON.stringify({ verdict: "looks fine" }), "stop"));
+    const slow = await reviewError();
+    expect(slow.exitCode).toBe(8);
+    expect(slow.code).toBe("malformed-output");
+    expect(slow.retryable).toBe(false);
+
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "10000";
+    stubSlowGateway(10, chatReply(JSON.stringify({ verdict: "looks fine" }), "stop"));
+    const fast = await reviewError();
+    expect(fast.code).toBe("malformed-output");
+    // no veto: its code decides, and malformed-output is retried
+    expect(fast.retryable).toBeUndefined();
+  });
+
   it("gives a retry only the time left under the call's shared deadline", async () => {
     process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "300";
     stubSlowGateway(5000, chatReply(REVIEW_JSON));
@@ -2496,9 +2512,10 @@ describe("gateway provider replies", () => {
     expect(Date.now() - started).toBeLessThan(1000);
     expect(error).toBeInstanceOf(ClawpatchError);
     expect((error as ClawpatchError).exitCode).toBe(4);
-    expect((error as ClawpatchError).message).toBe(
-      "gateway review: request failed (no reply within the 300ms gateway timeout)",
+    expect((error as ClawpatchError).message).toMatch(
+      /^gateway review: request failed \(no reply within the \d+ms left of the 300ms gateway timeout\)$/u,
     );
+    expect((error as ClawpatchError).deadlineExceeded).toBe(true);
   });
 
   it("warns once on an invalid CLAWPATCH_GATEWAY_MAX_TOKENS and sends none", async () => {

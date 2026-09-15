@@ -24,6 +24,9 @@ an alias for explicitness.
   and a retry is only made when the time left covers another attempt as long
   as the failed one, so a caller that sizes its budget from the timeout is
   never overrun by a retry.
+- **provider(gateway)**: a reply of the wrong shape (exit `8`) follows the
+  same time rule, and a retry cut off by the deadline reports the failure that
+  prompted it (its own class and exit code) rather than the timeout.
 - **provider(gateway)**: the full raw response of a failed reply is saved to
   `<state-dir>/provider-failures/` (newest 20 kept). The error names the file
   first and ends with the failure and its figures, so both survive a caller
