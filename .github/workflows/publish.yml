@@ -87,4 +87,12 @@ jobs:
         #     repository:        protoLabsAI/protoPatch
         #     workflow filename: publish.yml
         #     environment:       (leave blank — none configured)
-        run: npm publish --provenance --access public
+        run: |
+          # setup-node writes a placeholder //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+          # into $NPM_CONFIG_USERCONFIG. npm then treats the registry as already having a
+          # credential and never starts the Trusted Publishing exchange: the publish dies as
+          # a bare E404 on the PUT, with no OIDC line anywhere in the log. Deleting the entry
+          # is what makes npm exchange the GitHub OIDC token for a publish credential, and
+          # makes a rejection report itself as an auth failure instead of a missing package.
+          npm config delete //registry.npmjs.org/:_authToken --location=user || true
+          npm publish --provenance --access public
