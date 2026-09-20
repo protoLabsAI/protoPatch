@@ -196,9 +196,18 @@ describe("extractJson", () => {
     });
   });
 
+  it("recovers an answer wrapped in a doubled opening brace", () => {
+    const answer = '{"findings":[{"title":"x {y}"}],"inspected":{"files":["a.ts"]}}';
+    const expected = { findings: [{ title: "x {y}" }], inspected: { files: ["a.ts"] } };
+
+    expect(extractJson(`{${answer}})`)).toEqual(expected);
+    expect(extractJson(`{"${answer}}`)).toEqual(expected);
+  });
+
   it("returns null for text with no valid JSON", () => {
     expect(extractJson("no json here at all")).toBeNull();
     expect(extractJson("just some words { unbalanced")).toBeNull();
+    expect(extractJson("{".repeat(200))).toBeNull();
   });
 });
 

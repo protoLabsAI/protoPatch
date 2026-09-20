@@ -8,6 +8,18 @@ to make our releases unambiguous against upstream. The CLI binary stays as
 `clawpatch` for downstream compatibility; `protopatch` is also installed as
 an alias for explicitness.
 
+## 0.6.3 - Unreleased (protoLabs fork)
+
+- **provider**: `extractJson` recovers an answer wrapped in junk that balances
+  with it. `protolabs/smart` intermittently opens a structured reply with a
+  doubled brace (`{{"findings":…}})`, sometimes `{"{"findings":…`); the
+  balanced-brace scan skipped past the whole failed span and never tried the
+  valid object one character in, so the reply failed as
+  `response was not parseable JSON` (exit `4`) and the retry usually hit the same
+  shape. A second, descending scan now runs only when no top-level candidate
+  parses, so a draft object nested in a malformed preamble still never beats the
+  answer after it. All 25 captured live failures parse (36 findings recovered).
+
 ## 0.6.2 - Unreleased (protoLabs fork)
 
 - **provider(gateway)**: an unusable model reply is reported for what it is.

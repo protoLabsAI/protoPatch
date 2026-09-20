@@ -48,11 +48,36 @@ function extractJsonCandidate(text: string): unknown | null {
       return JSON.parse(candidate);
     } catch {}
   }
+  // Top-level candidates first: a failed candidate is skipped whole, so a draft
+  // object nested in a malformed preamble never beats the answer after it.
+  const topLevel = scanBalancedObjects(text, false);
+  if (topLevel !== null) {
+    return topLevel;
+  }
+  // Nothing parsed at the top level, so the answer may be wrapped in junk that
+  // balances with it — a reply that opens `{{"findings":…` and closes `}}`.
+  return scanBalancedObjects(text, true);
+}
+
+// Opening braces tried by a descending scan. The wrapping junk seen in practice
+// is a character or two at the very start of the reply; the cap keeps a large
+// brace-heavy reply that holds no JSON at all from going quadratic.
+const DESCEND_BRACE_LIMIT = 64;
+
+// Parses the first balanced `{…}` span that is valid JSON. After a span fails,
+// the scan resumes past its end — or, when `descend` is set, at the next opening
+// brace inside it.
+function scanBalancedObjects(text: string, descend: boolean): unknown | null {
   let firstBrace = text.indexOf("{");
+  let tried = 0;
   while (firstBrace !== -1) {
+    if (descend && (tried += 1) > DESCEND_BRACE_LIMIT) {
+      return null;
+    }
     let depth = 0;
     let inString = false;
     let escape = false;
+    const start = firstBrace;
     for (let i = firstBrace; i < text.length; i += 1) {
       const ch = text[i];
       if (escape) {
@@ -76,15 +101,17 @@ function extractJsonCandidate(text: string): unknown | null {
             try {
               return JSON.parse(candidate);
             } catch {
-              firstBrace = text.indexOf("{", i + 1);
+              firstBrace = text.indexOf("{", descend ? start + 1 : i + 1);
               break;
             }
           }
         }
       }
     }
-    if (depth !== 0) {
-      firstBrace = -1;
+    if (firstBrace === start) {
+      // The span never closed. Junk such as `{"{"findings":…` flips the string
+      // state for the rest of the text, so a descending scan tries the next brace.
+      firstBrace = descend ? text.indexOf("{", start + 1) : -1;
     }
   }
   return null;
