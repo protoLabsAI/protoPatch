@@ -31,3 +31,6 @@ jobs:
       # The CI merge-gate script (ci/protopatch-gate.py) parses the report format
       # reporting.ts renders — its tests pin that coupling (protoAgent#1874).
       - run: python3 ci/test_protopatch_gate.py
+      # The `Review at head` merge gate (scripts/review_at_head.py) — a guard whose failure
+      # mode is passing a head it should not; its tests are the only thing watching it.
+      - run: python3 ci/test_review_at_head.py
