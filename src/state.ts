@@ -1,4 +1,4 @@
-import { open, readdir, unlink } from "node:fs/promises";
+import { open, readdir, stat, unlink } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -38,8 +38,30 @@ export type FeatureLockReclaimOptions = {
   isPidAlive?: (pid: number) => boolean;
   /** Age after which a lock written on ANOTHER host is treated as abandoned. */
   maxForeignLockAgeMs?: number;
+  /** Age after which a lock FILE that can't be parsed (a crash between create and write) is an orphan. */
+  unreadableLockGraceMs?: number;
   now?: () => number;
 };
+
+// A claim creates the lock file and writes it back-to-back under the cross-process
+// mutation lock, so a live writer never leaves it unparseable for more than moments.
+// An empty/partial file older than this is a run that died between the two steps.
+const DEFAULT_UNREADABLE_LOCK_GRACE_MS = 60 * 1000;
+
+async function isOrphanedUnreadableLockFile(
+  paths: StatePaths,
+  featureId: string,
+  options: FeatureLockReclaimOptions,
+): Promise<boolean> {
+  let mtimeMs: number;
+  try {
+    mtimeMs = (await stat(featureLockPath(paths, featureId))).mtimeMs;
+  } catch {
+    return false;
+  }
+  const now = (options.now ?? Date.now)();
+  return now - mtimeMs > (options.unreadableLockGraceMs ?? DEFAULT_UNREADABLE_LOCK_GRACE_MS);
+}
 
 // A lock written on another host can't be pid-checked. In a container every recreate
 // changes the hostname, so a run killed by a redeploy (or by a supervisor's SIGKILL on a
@@ -320,7 +342,9 @@ async function reclaimStaleFeatureLock(
     readFeatureLockFile(paths, featureId),
   ]);
   const featureLock = feature?.lock ?? null;
-  if (featureLock === null && fileLock === null) {
+  const unreadableOrphan =
+    fileLock === null && (await isOrphanedUnreadableLockFile(paths, featureId, options));
+  if (featureLock === null && fileLock === null && !unreadableOrphan) {
     return false;
   }
   if (featureLock !== null && !isStaleLocalFeatureLock(featureLock, options)) {
@@ -332,7 +356,7 @@ async function reclaimStaleFeatureLock(
   if (featureLock !== null && feature !== null) {
     await writeFeature(paths, clearFeatureRecordLock(feature));
   }
-  if (fileLock !== null) {
+  if (fileLock !== null || unreadableOrphan) {
     await deleteFeatureLockFile(paths, featureId);
   }
   return true;
@@ -348,6 +372,8 @@ async function clearStaleFeatureLockUnderMutationLock(
     readFeatureLockFile(paths, featureId),
   ]);
   const featureLock = feature?.lock ?? null;
+  const unreadableOrphan =
+    fileLock === null && (await isOrphanedUnreadableLockFile(paths, featureId, options));
   if (featureLock !== null && !isStaleLocalFeatureLock(featureLock, options)) {
     return { featureCleared: false, lockFileCleared: false };
   }
@@ -357,7 +383,8 @@ async function clearStaleFeatureLockUnderMutationLock(
   if (featureLock !== null && feature !== null) {
     await writeFeature(paths, clearFeatureRecordLock(feature));
   }
-  const lockFileCleared = fileLock !== null && (await deleteFeatureLockFile(paths, featureId));
+  const lockFileCleared =
+    (fileLock !== null || unreadableOrphan) && (await deleteFeatureLockFile(paths, featureId));
   return { featureCleared: featureLock !== null, lockFileCleared };
 }
 

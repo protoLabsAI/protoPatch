@@ -22,6 +22,12 @@ inside the provider monolith, so upstream changes merge without conflict.
   locks are still decided by the pid alone (a live run keeps its lock however old);
   a lock with an unparseable `lockedAt` is never reclaimed by age.
 
+- **state**: an empty or partially-written lock file (a run killed between creating
+  the lock file and writing it) is reclaimed once it is older than 60 s. A live claim
+  creates and writes the file back-to-back under the cross-process mutation lock, so an
+  unparseable file past that grace is an orphan; before, recovery couldn't read it and
+  the feature stayed locked for good.
+
 ## 0.8.1 (protoLabs fork)
 
 - Rebased onto upstream `openclaw/clawpatch` 0.8.1 (159 upstream commits): the
