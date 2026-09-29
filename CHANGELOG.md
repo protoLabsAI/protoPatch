@@ -12,7 +12,23 @@ upstream release the fork is built on. The fork's additions live in their own
 adapter files (`src/providers/gateway.ts`, `src/providers/proto.ts`) instead of
 inside the provider monolith, so upstream changes merge without conflict.
 
-## 0.8.1 - Unreleased (protoLabs fork)
+## Unreleased (protoLabs fork)
+
+- **state**: a feature lock written on another host is reclaimed once it is older
+  than `CLAWPATCH_LOCK_STALE_MS` (default 2 h). Upstream's stale-lock reclaim only
+  covers a dead pid on the _same_ host; in a container every recreate changes the
+  hostname, so a run killed by a redeploy left a lock nothing could reclaim and every
+  later run needing that feature failed with `feature locked` (exit `7`). Same-host
+  locks are still decided by the pid alone (a live run keeps its lock however old);
+  a lock with an unparseable `lockedAt` is never reclaimed by age.
+
+- **state**: an empty or partially-written lock file (a run killed between creating
+  the lock file and writing it) is reclaimed once it is older than 60 s. A live claim
+  creates and writes the file back-to-back under the cross-process mutation lock, so an
+  unparseable file past that grace is an orphan; before, recovery couldn't read it and
+  the feature stayed locked for good.
+
+## 0.8.1 (protoLabs fork)
 
 - Rebased onto upstream `openclaw/clawpatch` 0.8.1 (159 upstream commits): the
   provider split into `src/providers/*`, per-feature `review --feature-list`,

@@ -11,6 +11,7 @@ import {
   rm,
   symlink,
   unlink,
+  utimes,
 } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import { delimiter, join } from "node:path";
@@ -1941,6 +1942,97 @@ describe("workflow", () => {
     expect(await readdir(paths.locks)).toEqual(
       features.map((feature) => `${feature.featureId}.json`).toSorted(),
     );
+  });
+
+  it("reclaims a remote-host lock once it is older than the foreign-lock age", async () => {
+    // A container recreate changes the hostname, so a run killed mid-review leaves a lock
+    // no pid check can clear; past the age bound it is reclaimed instead of failing exit 7.
+    const root = await fixtureRoot("clawpatch-aged-remote-lock-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "aged-remote-lock", bin: { tool: "src/tool.ts" } }),
+    );
+    await writeFixture(root, "src/tool.ts", "export const tool = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+    await initCommand(context, {});
+    await mapCommand(context);
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    const orphaned = {
+      lockedByRunId: "killed-by-redeploy",
+      lockedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      hostname: "old-container",
+      pid: 594031,
+    };
+    await writeFeature(paths, {
+      ...feature!,
+      status: "claimed",
+      lock: orphaned,
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFixture(
+      root,
+      `.clawpatch/locks/${feature!.featureId}.json`,
+      `${JSON.stringify(orphaned, null, 2)}\n`,
+    );
+
+    const claimed = await claimFeature(
+      paths,
+      feature!.featureId,
+      {
+        lockedByRunId: "run-next",
+        lockedAt: new Date().toISOString(),
+        hostname: "new-container",
+        pid: 7,
+      },
+      { staleLock: { hostname: "new-container", isPidAlive: () => true } },
+    );
+
+    expect(claimed.lock).toMatchObject({ lockedByRunId: "run-next" });
+  });
+
+  it("reclaims an empty lock file left by a crash, but not a fresh one", async () => {
+    // A run killed between creating the lock file and writing it leaves an empty file
+    // that no parser can read; past the grace it is an orphan, not a live claim.
+    const root = await fixtureRoot("clawpatch-empty-lock-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "empty-lock", bin: { tool: "src/tool.ts" } }),
+    );
+    await writeFixture(root, "src/tool.ts", "export const tool = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+    await initCommand(context, {});
+    await mapCommand(context);
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    const lockFile = join(paths.locks, `${feature!.featureId}.json`);
+    await writeFixture(root, `.clawpatch/locks/${feature!.featureId}.json`, "");
+    const nextLock = {
+      lockedByRunId: "run-next",
+      lockedAt: new Date().toISOString(),
+      hostname: "here",
+      pid: 7,
+    };
+    const staleLock = { hostname: "here", isPidAlive: () => true };
+
+    // Fresh (a writer could be mid-claim): still a conflict.
+    await expect(
+      claimFeature(paths, feature!.featureId, nextLock, { staleLock }),
+    ).rejects.toMatchObject({ code: "lock-conflict" });
+
+    // Past the grace: reclaimed.
+    const old = new Date(Date.now() - 5 * 60 * 1000);
+    await utimes(lockFile, old, old);
+    const claimed = await claimFeature(paths, feature!.featureId, nextLock, { staleLock });
+    expect(claimed.lock).toMatchObject({ lockedByRunId: "run-next" });
   });
 
   it("does not claim a stale feature after another run finishes it", async () => {
