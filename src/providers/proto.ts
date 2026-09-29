@@ -23,6 +23,7 @@ import { acpxFailureMessage, acpxPromptRetries, buildAcpxPrompt, extractAcpxJson
 
 const PROTO_DEFAULT_MODEL = "protolabs/reasoning";
 const PROTO_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const PROTO_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/u;
 
 function protoTimeoutMs(): number {
   return providerTimeoutMs("CLAWPATCH_PROTO_TIMEOUT_MS", PROTO_DEFAULT_TIMEOUT_MS);
@@ -34,6 +35,16 @@ function protoAgentCommand(options: ProviderOptions): string {
   // (per-invocation CLI override), then CLAWPATCH_PROTO_MODEL env, then the
   // package default.
   const model = options.model ?? process.env["CLAWPATCH_PROTO_MODEL"] ?? PROTO_DEFAULT_MODEL;
+  // The command is one string that acpx splits itself, so anything beyond a
+  // plain model id (whitespace, quotes, `;`, `$()`) could add arguments or
+  // commands of its own. Model ids are `provider/name:tag@version` shaped.
+  if (!PROTO_MODEL_PATTERN.test(model)) {
+    throw new ClawpatchError(
+      `proto provider: refusing model ${JSON.stringify(model)} — a model id may only contain letters, digits and . _ : / @ + -`,
+      2,
+      "invalid-model",
+    );
+  }
   return `proto --acp -m ${model}`;
 }
 
