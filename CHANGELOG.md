@@ -22,7 +22,7 @@ inside the provider monolith, so upstream changes merge without conflict.
   locks are still decided by the pid alone (a live run keeps its lock however old);
   a lock with an unparseable `lockedAt` is never reclaimed by age.
 
-## 0.8.1 - Unreleased (protoLabs fork)
+## 0.8.1 (protoLabs fork)
 
 - Rebased onto upstream `openclaw/clawpatch` 0.8.1 (159 upstream commits): the
   provider split into `src/providers/*`, per-feature `review --feature-list`,
