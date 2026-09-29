@@ -107,7 +107,7 @@ export async function mapCommand(
   const result = await mapWithSource(loaded.root, loaded.project, existing, heuristic, {
     source,
     provider,
-    providerOptions: providerOptions(config),
+    providerOptions: providerOptions(config, loaded.paths.stateDir),
     inventory: filters,
     onProgress: (event, fields) => {
       emitProgress(context, "map", event, fields);

@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClawpatchError } from "./errors.js";
 import { providerTesting, extractJson, providerByName } from "./provider.js";
 import { safeProviderPreview } from "./provider-json.js";
 import { agentMapJsonSchema, reviewJsonSchema } from "./provider-schema.js";
 import { evidenceRefSchema, revalidateOutputSchema, reviewOutputSchema } from "./types.js";
+import { fixtureRoot } from "./test-helpers.js";
 
 const {
   addClaudeModelArgs,
@@ -43,6 +46,7 @@ const {
   providerExitCode,
   providerJsonSchema,
 } = providerTesting;
+const gatewayAndProtoTesting = providerTesting;
 
 function withEnv(name: string, value: string | undefined, fn: () => void): void {
   const previous = process.env[name];
@@ -175,9 +179,18 @@ describe("extractJson", () => {
     });
   });
 
+  it("recovers an answer wrapped in a doubled opening brace", () => {
+    const answer = '{"findings":[{"title":"x {y}"}],"inspected":{"files":["a.ts"]}}';
+    const expected = { findings: [{ title: "x {y}" }], inspected: { files: ["a.ts"] } };
+
+    expect(extractJson(`{${answer}})`)).toEqual(expected);
+    expect(extractJson(`{"${answer}}`)).toEqual(expected);
+  });
+
   it("returns null for text with no valid JSON", () => {
     expect(extractJson("no json here at all")).toBeNull();
     expect(extractJson("just some words { unbalanced")).toBeNull();
+    expect(extractJson("{".repeat(200))).toBeNull();
   });
 });
 
@@ -1754,6 +1767,14 @@ describe("providerByName", () => {
     expect(providerByName("cursor").name).toBe("cursor");
   });
 
+  it("returns the gateway provider for HTTP-based reviews", () => {
+    expect(providerByName("gateway").name).toBe("gateway");
+  });
+
+  it("returns the proto provider (drives protoCLI via acpx --agent escape hatch)", () => {
+    expect(providerByName("proto").name).toBe("proto");
+  });
+
   it("still supports codex, mock, and mock-fail", () => {
     expect(providerByName("codex").name).toBe("codex");
     expect(providerByName("mock").name).toBe("mock");
@@ -1763,6 +1784,279 @@ describe("providerByName", () => {
   it("rejects direct model API providers", () => {
     expect(() => providerByName("minimax")).toThrow(/unsupported provider: minimax/u);
     expect(() => providerByName("deepseek")).toThrow(/unsupported provider: deepseek/u);
+  });
+});
+
+describe("proto provider helpers", () => {
+  const ENV_KEYS = [
+    "CLAWPATCH_PROTO_MODEL",
+    "CLAWPATCH_PROTO_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) snapshot[k] = process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  it("protoAgentCommand defaults to protolabs/reasoning when nothing is set", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const cmd = gatewayAndProtoTesting.protoAgentCommand({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(cmd).toBe("proto --acp -m protolabs/reasoning");
+  });
+
+  it("options.model > CLAWPATCH_PROTO_MODEL > default", () => {
+    process.env["CLAWPATCH_PROTO_MODEL"] = "env-model";
+    // eslint-disable-next-line no-underscore-dangle
+    const fromOpts = gatewayAndProtoTesting.protoAgentCommand({
+      model: "opts-model",
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(fromOpts).toBe("proto --acp -m opts-model");
+    // eslint-disable-next-line no-underscore-dangle
+    const fromEnv = gatewayAndProtoTesting.protoAgentCommand({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(fromEnv).toBe("proto --acp -m env-model");
+  });
+
+  it("buildProtoAcpxArgs (read mode) uses --agent escape hatch and approve-reads", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const args = gatewayAndProtoTesting.buildProtoAcpxArgs(
+      "/some/root",
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      "read",
+    );
+    expect(args[0]).toBe("--agent");
+    expect(args[1]).toBe("proto --acp -m protolabs/reasoning");
+    expect(args).toContain("--cwd");
+    expect(args).toContain("/some/root");
+    expect(args).toContain("--approve-reads");
+    expect(args).toContain("--format");
+    expect(args).toContain("json");
+    expect(args).toContain("--json-strict");
+    expect(args).toContain("--suppress-reads");
+    // tail of args: exec --file -
+    expect(args.slice(-3)).toEqual(["exec", "--file", "-"]);
+  });
+
+  it("buildProtoAcpxArgs (approve mode) uses --approve-all (write-capable)", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    const args = gatewayAndProtoTesting.buildProtoAcpxArgs(
+      "/r",
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      "approve",
+    );
+    expect(args).toContain("--approve-all");
+    expect(args).not.toContain("--approve-reads");
+  });
+
+  it("protoTimeoutMs honors CLAWPATCH_PROTO_TIMEOUT_MS then provider-wide fallback then 5-min default", () => {
+    // eslint-disable-next-line no-underscore-dangle
+    expect(gatewayAndProtoTesting.protoTimeoutMs()).toBe(5 * 60 * 1000);
+    process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"] = "120000";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(gatewayAndProtoTesting.protoTimeoutMs()).toBe(120000);
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "90000";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(gatewayAndProtoTesting.protoTimeoutMs()).toBe(90000); // proto-specific wins
+  });
+
+  it("protoTimeoutMs rejects garbage values (falls back to 5-min default)", () => {
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "not-a-number";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(gatewayAndProtoTesting.protoTimeoutMs()).toBe(5 * 60 * 1000);
+    process.env["CLAWPATCH_PROTO_TIMEOUT_MS"] = "-1";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(gatewayAndProtoTesting.protoTimeoutMs()).toBe(5 * 60 * 1000);
+  });
+});
+
+describe("gateway provider config", () => {
+  const ENV_KEYS = [
+    "GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAWPATCH_GATEWAY_MODEL",
+    "CLAWPATCH_GATEWAY_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) snapshot[k] = process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  it("throws ClawpatchError(provider-auth) when no API key is set", () => {
+    expect(() =>
+      // eslint-disable-next-line no-underscore-dangle
+      gatewayAndProtoTesting.gatewayConfig({
+        model: null,
+        reasoningEffort: null,
+        skipGitRepoCheck: false,
+      }),
+    ).toThrowError(ClawpatchError);
+  });
+
+  it("prefers GATEWAY_API_KEY over OPENAI_API_KEY", () => {
+    process.env["GATEWAY_API_KEY"] = "gw-primary";
+    process.env["OPENAI_API_KEY"] = "openai-fallback";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(cfg.apiKey).toBe("gw-primary");
+  });
+
+  it("falls back to OPENAI_API_KEY when GATEWAY_API_KEY is unset", () => {
+    process.env["OPENAI_API_KEY"] = "openai-only";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(cfg.apiKey).toBe("openai-only");
+  });
+
+  it("strips trailing slashes from OPENAI_BASE_URL", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["OPENAI_BASE_URL"] = "https://gateway.example/v1////";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(cfg.baseUrl).toBe("https://gateway.example/v1");
+  });
+
+  it("defaults to api.proto-labs.ai when OPENAI_BASE_URL is unset", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    // eslint-disable-next-line no-underscore-dangle
+    const cfg = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(cfg.baseUrl).toBe("https://api.proto-labs.ai/v1");
+  });
+
+  it("options.model wins over CLAWPATCH_GATEWAY_MODEL wins over default", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["CLAWPATCH_GATEWAY_MODEL"] = "env-model";
+    // eslint-disable-next-line no-underscore-dangle
+    const fromOpts = gatewayAndProtoTesting.gatewayConfig({
+      model: "opts-model",
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(fromOpts.model).toBe("opts-model");
+    // eslint-disable-next-line no-underscore-dangle
+    const fromEnv = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(fromEnv.model).toBe("env-model");
+    delete process.env["CLAWPATCH_GATEWAY_MODEL"];
+    // eslint-disable-next-line no-underscore-dangle
+    const fromDefault = gatewayAndProtoTesting.gatewayConfig({
+      model: null,
+      reasoningEffort: null,
+      skipGitRepoCheck: false,
+    });
+    expect(fromDefault.model).toBe("protolabs/smart");
+  });
+
+  it("parses CLAWPATCH_GATEWAY_TIMEOUT_MS and rejects garbage values", () => {
+    process.env["GATEWAY_API_KEY"] = "k";
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "12345";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(
+      gatewayAndProtoTesting.gatewayConfig({
+        model: null,
+        reasoningEffort: null,
+        skipGitRepoCheck: false,
+      }).timeoutMs,
+    ).toBe(12345);
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "not-a-number";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(
+      gatewayAndProtoTesting.gatewayConfig({
+        model: null,
+        reasoningEffort: null,
+        skipGitRepoCheck: false,
+      }).timeoutMs,
+    ).toBe(300000);
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "-1";
+    // eslint-disable-next-line no-underscore-dangle
+    expect(
+      gatewayAndProtoTesting.gatewayConfig({
+        model: null,
+        reasoningEffort: null,
+        skipGitRepoCheck: false,
+      }).timeoutMs,
+    ).toBe(300000);
+  });
+});
+
+describe("gateway provider check()", () => {
+  const saved = {
+    gw: process.env["GATEWAY_API_KEY"],
+    oa: process.env["OPENAI_API_KEY"],
+    base: process.env["OPENAI_BASE_URL"],
+  };
+
+  afterEach(() => {
+    if (saved.gw === undefined) delete process.env["GATEWAY_API_KEY"];
+    else process.env["GATEWAY_API_KEY"] = saved.gw;
+    if (saved.oa === undefined) delete process.env["OPENAI_API_KEY"];
+    else process.env["OPENAI_API_KEY"] = saved.oa;
+    if (saved.base === undefined) delete process.env["OPENAI_BASE_URL"];
+    else process.env["OPENAI_BASE_URL"] = saved.base;
+  });
+
+  it("returns a fingerprint string when env is configured (no network call)", async () => {
+    delete process.env["OPENAI_API_KEY"];
+    process.env["GATEWAY_API_KEY"] = "test-key";
+    process.env["OPENAI_BASE_URL"] = "https://my.gateway/v1";
+    const out = await providerByName("gateway").check("/tmp");
+    expect(out).toContain("gateway");
+    expect(out).toContain("https://my.gateway/v1");
+    expect(out).toContain("protolabs/smart");
+    expect(out).not.toContain("test-key"); // never leak the secret into stdout
+  });
+
+  it("throws ClawpatchError when no API key is available", async () => {
+    delete process.env["GATEWAY_API_KEY"];
+    delete process.env["OPENAI_API_KEY"];
+    await expect(providerByName("gateway").check("/tmp")).rejects.toThrow(ClawpatchError);
   });
 });
 
@@ -1931,5 +2225,454 @@ describe("buildAcpxJsonArgs", () => {
     expect(modelIdx).toBeGreaterThanOrEqual(0);
     expect(args[modelIdx + 1]).toBe("opus");
     expect(args).toContain("gamma");
+  });
+});
+
+describe("extractJson reasoning blocks", () => {
+  it("prefers the answer after a <think> block that holds unbalanced braces", () => {
+    const input =
+      '<think>the handler `if (x) {` never closes, and the "main" path is fine</think>\n' +
+      '{"outcome":"fixed","reasoning":"ok","commands":[]}';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  it("prefers the final answer over a draft object inside the reasoning block", () => {
+    const input =
+      '<think>draft: {"outcome":"draft","reasoning":"x","commands":[]}</think>' +
+      '```json\n{"outcome":"fixed","reasoning":"ok","commands":[]}\n```';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  it("ignores a closing tag that does not follow a leading reasoning block", () => {
+    const input = '{"outcome":"fixed","reasoning":"ok","commands":[]}</think> trailing words';
+    expect(extractJson(input)).toEqual({ outcome: "fixed", reasoning: "ok", commands: [] });
+  });
+
+  // Regression (round-2 review): a valid reply whose string quotes `</think>`
+  // and later a `{}` literal must come back whole, not as `{}`.
+  it("returns a valid reply whole even when a string quotes </think> and {}", () => {
+    const reply = {
+      findings: [],
+      inspected: {
+        files: [],
+        symbols: [],
+        notes: ["x.split('</think>')[-1] if '</think>' in x else {}"],
+      },
+    };
+    expect(extractJson(JSON.stringify(reply))).toEqual(reply);
+  });
+
+  it("keeps a fenced or prose-wrapped reply whole when a string quotes </think> {}", () => {
+    const reply = { notes: ["strip it: </think> {} then parse"] };
+    expect(extractJson("```json\n" + JSON.stringify(reply) + "\n```")).toEqual(reply);
+    expect(extractJson(`Result: ${JSON.stringify(reply)} done`)).toEqual(reply);
+  });
+
+  it("ends a leading reasoning block at its first close tag", () => {
+    const reply = { notes: ["</think> {}"] };
+    expect(extractJson(`<think>plan { draft</think>${JSON.stringify(reply)}`)).toEqual(reply);
+  });
+});
+
+function chatReply(
+  content: string,
+  finishReason: string | null = "stop",
+  extra: Record<string, unknown> = {},
+  message: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "chatcmpl-test",
+    object: "chat.completion",
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason,
+        message: { role: "assistant", content, ...message },
+      },
+    ],
+    ...extra,
+  };
+}
+
+// Each call to the stubbed fetch answers with the next body (the last one
+// repeats). Returns the mock so tests can inspect what was sent.
+function stubGateway(...bodies: Array<string | Record<string, unknown>>) {
+  const queue = [...bodies];
+  const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    const text = typeof next === "string" ? next : JSON.stringify(next);
+    return new Response(text, { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function sentBody(fetchMock: ReturnType<typeof stubGateway>, call = 0): Record<string, unknown> {
+  const init = fetchMock.mock.calls[call]?.[1];
+  return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+// Like stubGateway, but the reply arrives after `delayMs`, and an abort of the
+// request signal rejects the call the way real fetch does.
+function stubSlowGateway(delayMs: number, reply: Record<string, unknown>) {
+  const fetchMock = vi.fn(
+    (_url: string, init: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve(new Response(JSON.stringify(reply), { status: 200 }));
+        }, delayMs);
+        init.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("This operation was aborted", "AbortError"));
+        });
+      }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function gatewayReviewOptions(dir: string | null) {
+  return { model: null, reasoningEffort: null, skipGitRepoCheck: false, diagnosticsDir: dir };
+}
+
+function capturePathFrom(error: ClawpatchError): string {
+  const match = error.message.match(/full response saved to (.+?) — /u);
+  if (!match?.[1]) throw new Error(`no capture path in: ${error.message}`);
+  return match[1];
+}
+
+describe("gateway provider replies", () => {
+  const ENV_KEYS = [
+    "GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAWPATCH_GATEWAY_MODEL",
+    "CLAWPATCH_GATEWAY_TIMEOUT_MS",
+    "CLAWPATCH_PROVIDER_TIMEOUT_MS",
+    "CLAWPATCH_GATEWAY_MAX_TOKENS",
+  ] as const;
+  const snapshot: Record<string, string | undefined> = {};
+  let diagnosticsDir: string;
+
+  beforeEach(async () => {
+    for (const k of ENV_KEYS) {
+      snapshot[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env["GATEWAY_API_KEY"] = "test-secret-key";
+    process.env["OPENAI_BASE_URL"] = "https://gateway.test/v1";
+    diagnosticsDir = join(await fixtureRoot("clawpatch-gateway-diag-"), "provider-failures");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  });
+
+  const REVIEW_JSON = JSON.stringify({
+    findings: [
+      {
+        title: "repairAddressedTurnEcho leaves authored bubble unstamped when echo is dropped",
+        category: "bug",
+        severity: "medium",
+        confidence: "medium",
+        evidence: [{ path: "src/chat.ts", startLine: 10, endLine: 12, symbol: null, quote: null }],
+        reasoning: "The echo branch returns before stamping the bubble.",
+        reproduction: null,
+        recommendation: "Stamp the bubble before returning.",
+        whyTestsDoNotAlreadyCoverThis: "No test drops the echo.",
+        suggestedRegressionTest: null,
+        minimumFixScope: "src/chat.ts",
+      },
+    ],
+    inspected: { files: ["src/chat.ts"], symbols: [], notes: [] },
+  });
+
+  async function reviewError(dir: string | null = diagnosticsDir): Promise<ClawpatchError> {
+    try {
+      await providerByName("gateway").review("/tmp", "review this", gatewayReviewOptions(dir));
+    } catch (error: unknown) {
+      if (error instanceof ClawpatchError) return error;
+      throw error;
+    }
+    throw new Error("expected the gateway review to fail");
+  }
+
+  it("parses a clean structured reply and sends no max_tokens by default", async () => {
+    const fetchMock = stubGateway(chatReply(REVIEW_JSON));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+    const body = sentBody(fetchMock);
+    expect(body).not.toHaveProperty("max_tokens");
+    expect(body).not.toHaveProperty("max_completion_tokens");
+    expect(body["response_format"]).toMatchObject({ type: "json_schema" });
+  });
+
+  it.each([
+    ["a json fence", "```json\n" + REVIEW_JSON + "\n```"],
+    ["leading and trailing prose", `Here is the review:\n${REVIEW_JSON}\nHope this helps.`],
+    ["a <think> block with a stray brace", `<think>if (x) { is unclosed</think>${REVIEW_JSON}`],
+  ])("accepts a reply wrapped in %s", async (_label, content) => {
+    stubGateway(chatReply(content));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+  });
+
+  it("reports a reply cut off at the output limit as a truncation it does not retry", async () => {
+    stubGateway(
+      chatReply(REVIEW_JSON.slice(0, 180), "length", {
+        usage: {
+          prompt_tokens: 91234,
+          completion_tokens: 32000,
+          completion_tokens_details: { reasoning_tokens: 12000 },
+        },
+      }),
+    );
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(false);
+    expect(error.message).toContain(" — response truncated at the output limit (");
+    expect(error.message).not.toContain("not parseable");
+    expect(error.message).toContain("finish_reason=length");
+    expect(error.message).toContain("completion_tokens=32000");
+    expect(error.message).toContain("reasoning_tokens=12000");
+    expect(error.message).toContain("prompt_tokens=91234");
+    expect(error.message).toContain("max_tokens=unset");
+    // no content excerpt: the failure class must stay inside a short stderr tail
+    expect(error.message).not.toContain("tail=");
+  });
+
+  it("reports reasoning that consumed the whole output budget as truncation", async () => {
+    stubGateway(
+      chatReply(
+        "",
+        "length",
+        {
+          usage: {
+            completion_tokens: 32000,
+            completion_tokens_details: { reasoning_tokens: 32000 },
+          },
+        },
+        { reasoning_content: "x".repeat(500) },
+      ),
+    );
+    const error = await reviewError();
+    expect(error.message).toContain("response truncated at the output limit");
+    expect(error.message).toContain("content_chars=0");
+    expect(error.message).toContain("reasoning_chars=500");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("keeps a complete answer even when finish_reason is length", async () => {
+    stubGateway(chatReply(REVIEW_JSON, "length"));
+    const out = await providerByName("gateway").review(
+      "/tmp",
+      "review this",
+      gatewayReviewOptions(diagnosticsDir),
+    );
+    expect(out.findings).toHaveLength(1);
+  });
+
+  it("reports broken JSON with finish_reason and saves the full raw response", async () => {
+    const broken = `${REVIEW_JSON.slice(0, 150)} ${"filler ".repeat(200)}]]`;
+    const reply = chatReply(broken, "stop", { usage: { completion_tokens: 900 } });
+    stubGateway(reply);
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(true);
+    expect(error.message).toContain(" — response was not parseable JSON (");
+    expect(error.message).toContain("finish_reason=stop");
+    expect(error.message).toContain(`content_chars=${broken.length}`);
+    // the tail shows where the JSON broke, not the uninformative head
+    expect(error.message).toContain("tail=…");
+    expect(error.message).toContain("filler ]]");
+
+    const capturePath = capturePathFrom(error);
+    expect(capturePath.startsWith(diagnosticsDir)).toBe(true);
+    const saved = await readFile(capturePath, "utf8");
+    const record = JSON.parse(saved) as Record<string, unknown>;
+    expect(record["rawBody"]).toBe(JSON.stringify(reply));
+    expect(record["label"]).toBe("review");
+    expect(record["model"]).toBe("protolabs/smart");
+    expect(record["httpStatus"]).toBe(200);
+    expect(record["promptChars"]).toBe("review this".length);
+    expect(saved).not.toContain("test-secret-key");
+  });
+
+  it("does not write a capture when no diagnostics dir is configured", async () => {
+    stubGateway(chatReply("definitely not json", "stop"));
+    const error = await reviewError(null);
+    expect(error.message).toContain("response was not parseable JSON");
+    expect(error.message).not.toContain("full response saved to");
+    await expect(readdir(diagnosticsDir)).rejects.toThrow();
+  });
+
+  it("prunes captures to the newest 20 and leaves unrelated files alone", async () => {
+    await mkdir(diagnosticsDir, { recursive: true });
+    for (let i = 0; i < 22; i += 1) {
+      const name = `20200101T0000000${String(i).padStart(2, "0")}Z-gateway-review-0000000${i % 10}.json`;
+      await writeFile(join(diagnosticsDir, name), "{}\n", "utf8");
+    }
+    await writeFile(join(diagnosticsDir, "notes.txt"), "keep me\n", "utf8");
+    stubGateway(chatReply("not json", "stop"));
+    const error = await reviewError();
+    const entries = await readdir(diagnosticsDir);
+    const captures = entries.filter((name) => name.includes("-gateway-"));
+    expect(captures).toHaveLength(20);
+    expect(entries).toContain("notes.txt");
+    expect(captures).toContain(capturePathFrom(error).slice(diagnosticsDir.length + 1));
+    expect(captures.some((name) => name.startsWith("20200101T000000000Z"))).toBe(false);
+  });
+
+  it("sends max_tokens only when CLAWPATCH_GATEWAY_MAX_TOKENS is a positive integer", async () => {
+    process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = "48000";
+    const fetchMock = stubGateway(chatReply(REVIEW_JSON.slice(0, 50), "length"));
+    const error = await reviewError();
+    expect(sentBody(fetchMock)["max_tokens"]).toBe(48000);
+    expect(error.message).toContain("max_tokens=48000");
+
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    for (const garbage of ["", "abc", "0", "-5", "1.5"]) {
+      process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = garbage;
+      // eslint-disable-next-line no-underscore-dangle
+      expect(
+        gatewayAndProtoTesting.gatewayConfig(gatewayReviewOptions(diagnosticsDir)).maxTokens,
+      ).toBeNull();
+    }
+    write.mockRestore();
+  });
+
+  it("treats a 200 body that is not JSON as a retryable provider-failure", async () => {
+    stubGateway("<html><body>502 Bad Gateway</body></html>");
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(true);
+    expect(error.message).toContain(" — response body was not JSON (");
+  });
+
+  it("keeps an API error in the body non-retryable", async () => {
+    stubGateway({ error: { message: "model not found" } });
+    const error = await reviewError();
+    expect(error.exitCode).toBe(4);
+    expect(error.code).toBe("provider-failure");
+    expect(error.retryable).toBe(false);
+    expect(error.message).toMatch(
+      /^gateway review: full response saved to .+ — API error — model not found$/u,
+    );
+  });
+
+  it("keeps the failure class and facts in the last 400 chars of stderr", async () => {
+    // pr-reviewer keeps only the last 400 chars of stderr; a long state-dir
+    // path must not push out what failed.
+    diagnosticsDir = join(
+      await fixtureRoot("clawpatch-gateway-long-"),
+      "a".repeat(180),
+      "b".repeat(180),
+      "provider-failures",
+    );
+    stubGateway(
+      chatReply(REVIEW_JSON.slice(0, 120), "length", {
+        usage: { prompt_tokens: 91234, completion_tokens: 32000 },
+      }),
+    );
+    const truncated = await reviewError();
+    expect(truncated.message.startsWith("gateway review: full response saved to ")).toBe(true);
+    expect(capturePathFrom(truncated).length).toBeGreaterThan(400);
+    const truncatedTail = `error: ${truncated.message}`.slice(-400);
+    expect(truncatedTail).toContain("response truncated at the output limit");
+    expect(truncatedTail).toContain("finish_reason=length");
+    expect(truncatedTail).toContain("completion_tokens=32000");
+
+    stubGateway(chatReply(`${REVIEW_JSON.slice(0, 120)} ${"x".repeat(500)}`, "stop"));
+    const unparseable = await reviewError();
+    const unparseableTail = `error: ${unparseable.message}`.slice(-400);
+    expect(unparseableTail).toContain("response was not parseable JSON");
+    expect(unparseableTail).toContain("finish_reason=stop");
+  });
+
+  it("does not offer a retry when the attempt used more than half the timeout", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "400";
+    stubSlowGateway(250, chatReply("{ not json", "stop"));
+    const error = await reviewError();
+    expect(error.message).toContain("response was not parseable JSON");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("offers a retry for an unparseable reply that came back quickly", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "10000";
+    stubSlowGateway(10, chatReply("{ not json", "stop"));
+    const error = await reviewError();
+    expect(error.retryable).toBe(true);
+  });
+
+  it("vetoes a retry of a wrong-shape reply that used more than half the timeout", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "400";
+    stubSlowGateway(250, chatReply(JSON.stringify({ verdict: "looks fine" }), "stop"));
+    const slow = await reviewError();
+    expect(slow.exitCode).toBe(8);
+    expect(slow.code).toBe("malformed-output");
+    expect(slow.retryable).toBe(false);
+
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "10000";
+    stubSlowGateway(10, chatReply(JSON.stringify({ verdict: "looks fine" }), "stop"));
+    const fast = await reviewError();
+    expect(fast.code).toBe("malformed-output");
+    // no veto: its code decides, and malformed-output is retried
+    expect(fast.retryable).toBeUndefined();
+  });
+
+  it("gives a retry only the time left under the call's shared deadline", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "300";
+    stubSlowGateway(5000, chatReply(REVIEW_JSON));
+    const started = Date.now();
+    const error = await providerByName("gateway")
+      .review("/tmp", "review this", {
+        ...gatewayReviewOptions(diagnosticsDir),
+        callStartedAt: started - 250,
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(error).toBeInstanceOf(ClawpatchError);
+    expect((error as ClawpatchError).exitCode).toBe(4);
+    expect((error as ClawpatchError).message).toMatch(
+      /^gateway review: request failed \(no reply within the \d+ms left of the 300ms gateway timeout\)$/u,
+    );
+    expect((error as ClawpatchError).deadlineExceeded).toBe(true);
+  });
+
+  it("warns once on an invalid CLAWPATCH_GATEWAY_MAX_TOKENS and sends none", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      process.env["CLAWPATCH_GATEWAY_MAX_TOKENS"] = "32k-typo";
+      const fetchMock = stubGateway(chatReply(REVIEW_JSON));
+      await providerByName("gateway").review("/tmp", "a", gatewayReviewOptions(diagnosticsDir));
+      await providerByName("gateway").review("/tmp", "b", gatewayReviewOptions(diagnosticsDir));
+      expect(sentBody(fetchMock)).not.toHaveProperty("max_tokens");
+      const warnings = write.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((line) => line.includes("CLAWPATCH_GATEWAY_MAX_TOKENS"));
+      expect(warnings).toEqual([
+        'warning: ignoring CLAWPATCH_GATEWAY_MAX_TOKENS="32k-typo" (expected a positive integer); no max_tokens is sent\n',
+      ]);
+    } finally {
+      write.mockRestore();
+    }
   });
 });

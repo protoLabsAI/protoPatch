@@ -127,7 +127,11 @@ async function runAcpxJson<T>(
   return parseAcpxJsonOutput(result.stdout, parseOutput);
 }
 
-function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "approve"): string {
+export function buildAcpxPrompt(
+  prompt: string,
+  schema: object,
+  permission: "read" | "approve",
+): string {
   const promptBody =
     permission === "read"
       ? "READ-ONLY REVIEW MODE.\n" +
@@ -336,7 +340,11 @@ function chunkSuffixCandidates(chunks: string[]): string[] {
   return candidates;
 }
 
-function acpxFailureMessage(stdout: string, stderr: string, exitCode: number | null): string {
+export function acpxFailureMessage(
+  stdout: string,
+  stderr: string,
+  exitCode: number | null,
+): string {
   const error = extractAcpxError(stdout);
   if (error !== null) {
     return `acpx provider failed: ${error}`;
@@ -414,7 +422,7 @@ function acpxTimeoutMs(): number {
   return providerTimeoutMs("CLAWPATCH_ACPX_TIMEOUT_MS", ACPX_DEFAULT_TIMEOUT_MS);
 }
 
-function acpxPromptRetries(): number {
+export function acpxPromptRetries(): number {
   const raw = process.env["CLAWPATCH_ACPX_PROMPT_RETRIES"];
   if (raw === undefined) {
     return 1;

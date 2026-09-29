@@ -14,6 +14,18 @@ export type ProviderOptions = {
   reasoningEffort: ReasoningEffort | null;
   codexConfig?: CodexConfig;
   skipGitRepoCheck: boolean;
+  /**
+   * Directory a provider may write diagnostics into when a call fails (the
+   * gateway provider saves the full raw response of an unusable reply here).
+   * Unset or null = no capture.
+   */
+  diagnosticsDir?: string | null;
+  /**
+   * Epoch ms when the first attempt of this logical call started. A provider
+   * with a timeout counts it from here, so a retry shares the first attempt's
+   * budget instead of getting a fresh one. Unset = this attempt starts it.
+   */
+  callStartedAt?: number;
 };
 
 export type DroppedFinding = {

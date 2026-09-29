@@ -84,7 +84,7 @@ export async function fixCommand(
   const beforeChanged = await sourceChangedSnapshots(loaded.root, loaded.paths.stateDir);
   let plan: FixPlanOutput;
   try {
-    plan = await provider.fix(loaded.root, prompt, providerOptions(config));
+    plan = await provider.fix(loaded.root, prompt, providerOptions(config, loaded.paths.stateDir));
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     const afterChanged = await sourceChangedSnapshots(loaded.root, loaded.paths.stateDir);

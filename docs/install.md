@@ -5,17 +5,33 @@ description: "How to install clawpatch from npm or source"
 
 # Installation
 
+> This is the **protoLabs fork** (`protoLabsAI/protoPatch`). The upstream
+> `openclaw/clawpatch` on npm does not include the `gateway` provider —
+> see [Providers → gateway](providers.md#gateway) for what that adds.
+
 ## npm/pnpm
 
+From the protoLabs npm package:
+
 ```bash
-pnpm add -g clawpatch
+pnpm add -g @protolabsai/protopatch
 ```
 
 Or with npm:
 
 ```bash
-npm install -g clawpatch
+npm install -g @protolabsai/protopatch
 ```
+
+Or pull straight from the repo to track `main`:
+
+```bash
+pnpm add -g github:protoLabsAI/protoPatch
+```
+
+Both `clawpatch` and `protopatch` are installed as CLI binaries — they point
+at the same entry. The fork keeps `clawpatch` so existing workflows and the
+rest of this documentation work unchanged.
 
 Verify:
 
@@ -28,8 +44,8 @@ clawpatch --version
 Clone and build:
 
 ```bash
-git clone https://github.com/openclaw/clawpatch.git
-cd clawpatch
+git clone https://github.com/protoLabsAI/protoPatch.git
+cd protoPatch
 pnpm install
 pnpm build
 pnpm link --global

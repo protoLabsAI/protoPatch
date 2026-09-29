@@ -80,6 +80,7 @@ describe("package smoke harness", () => {
     expect(installArgs).toEqual([
       "install",
       "--offline",
+      "--ignore-scripts",
       "--omit=dev",
       "--cache",
       "/tmp/cache",

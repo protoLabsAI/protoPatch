@@ -1,22 +1,31 @@
 {
-  "name": "clawpatch",
+  "name": "@protolabsai/protopatch",
   "version": "0.8.1",
-  "description": "Automated code review that lands fixes.",
+  "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
+  "homepage": "https://github.com/protoLabsAI/protoPatch#readme",
+  "bugs": {
+    "url": "https://github.com/protoLabsAI/protoPatch/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openclaw/clawpatch.git"
+    "url": "git+https://github.com/protoLabsAI/protoPatch.git"
   },
   "bin": {
-    "clawpatch": "dist/cli.js"
+    "clawpatch": "dist/cli.js",
+    "protopatch": "dist/cli.js"
   },
   "files": [
     "dist",
     "README.md",
     "VISION.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "prepack": "pnpm run build",
@@ -38,6 +47,7 @@
   "dependencies": {
     "js-tokens": "^10.0.0",
     "proper-lockfile": "^4.1.2",
+    "undici": "^8.11.2",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -50,7 +60,7 @@
     "vitest": "^5.0.1"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "packageManager": "pnpm@11.27.1+sha512.a81d4c21b9b09a4b0aebf90ef5e527d4262bdda322d26082978cb549023ac6d9cafc98b19fffaa5c71db438a65f70224edb78d7311187861ff96480d1cdca23c"
 }

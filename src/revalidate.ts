@@ -73,7 +73,11 @@ export async function revalidateCommand(
         linkedPatchAttempts,
         config,
       );
-      const output = await provider.revalidate(loaded.root, prompt, providerOptions(config));
+      const output = await provider.revalidate(
+        loaded.root,
+        prompt,
+        providerOptions(config, loaded.paths.stateDir),
+      );
       const updated = appendFindingHistory(
         {
           ...finding,

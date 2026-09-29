@@ -326,6 +326,10 @@ function installArgs({ installRoot, npmCache, tarball, dependencyTarballs }) {
   return [
     "install",
     "--offline",
+    // Runtime deps are installed from their local directories, and npm runs a
+    // directory's `prepare` script (undici's needs husky, a dev tool). A registry
+    // install never runs it, so skip scripts here to match what users get.
+    "--ignore-scripts",
     "--omit=dev",
     "--cache",
     npmCache,

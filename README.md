@@ -1,5 +1,12 @@
 # clawpatch 🩹 — Review by feature, fix by finding.
 
+> **protoLabs fork.** `@protolabsai/protopatch` is a protoLabs-maintained fork of
+> [`openclaw/clawpatch`](https://github.com/openclaw/clawpatch), rebased onto upstream
+> 0.8.1. It adds a **`gateway` provider** (any OpenAI-compatible HTTP endpoint) and a
+> **`proto` provider** (protoCLI over ACP) — see [`docs/providers.md`](docs/providers.md#gateway).
+> Install the fork with `pnpm add -g @protolabsai/protopatch`; the binaries are
+> `clawpatch` and `protopatch`. Source: [`protoLabsAI/protoPatch`](https://github.com/protoLabsAI/protoPatch).
+
 ![clawpatch banner](docs/assets/readme-banner.jpg)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/openclaw/clawpatch/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/openclaw/clawpatch/actions/workflows/ci.yml)

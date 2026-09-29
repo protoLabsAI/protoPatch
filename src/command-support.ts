@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { loadConfig, parseReasoningEffort } from "./config.js";
 import { nowIso } from "./fs.js";
 import type { RunRecord } from "./types.js";
@@ -32,12 +33,13 @@ export function applyProviderFlags(
   };
 }
 
-export function providerOptions(config: ReturnType<typeof applyProviderFlags>) {
+export function providerOptions(config: ReturnType<typeof applyProviderFlags>, stateDir: string) {
   return {
     model: config.provider.model,
     reasoningEffort: config.provider.reasoningEffort,
     codexConfig: config.provider.codexConfig,
     skipGitRepoCheck: config.provider.skipGitRepoCheck,
+    diagnosticsDir: join(stateDir, "provider-failures"),
   };
 }
 

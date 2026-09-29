@@ -29,6 +29,13 @@ Provider names today:
 - `opencode`: shells out to `opencode run --format json`
 - `pi`: shells out to `pi -p` (non-interactive print mode)
 - `cursor`: shells out to `cursor-agent -p --output-format json`
+- `gateway`: HTTP POST to any OpenAI-compatible `/chat/completions` endpoint
+  with structured outputs — no CLI dependency. **Added in the protoLabs fork
+  (`@protolabsai/protopatch`).** See [Gateway](#gateway) below.
+- `proto`: drives the protoCLI agent (`@protolabsai/proto`) over ACP via
+  `acpx --agent "proto --acp"`. Tool-use review path complementary to
+  `gateway`'s stateless LLM path. **Added in `@protolabsai/protopatch@0.6.0`.**
+  See [Proto](#proto) below.
 - `mock`: deterministic provider for tests and fixtures
 - `mock-fail`: failure provider for tests
 
@@ -386,3 +393,163 @@ implementation uses `--trust` for the explicit trusted-workspace path and never
 uses `--force` or `--yolo`. Complete HITL verification before promoting this to
 default provider support, especially for ambient rules, MCP configuration,
 temporary prompt file handling, timeout behavior, and any claimed read-only mode.
+
+## Proto
+
+> Added in the protoLabs fork (`@protolabsai/protopatch`, 0.6.0). Not present
+> in upstream `openclaw/clawpatch`.
+
+Drives the protoCLI agent ([`@protolabsai/proto`](https://github.com/protoLabsAI/protoCLI))
+over the Agent Client Protocol. Built on top of acpx's `--agent` escape
+hatch so we don't need acpx to ship a `proto` subcommand upstream — the
+provider invokes `acpx --agent "proto --acp -m <model>"` and otherwise
+behaves identically to the `acpx` provider (same JSON-schema mechanics,
+same prompt/stdin contract).
+
+### Why use this over `gateway`
+
+- **`gateway`** sends an already-assembled prompt (with file contents inlined)
+  to an OpenAI-compatible endpoint. Fast, cheap, stateless. Right for the
+  common case.
+- **`proto`** spawns protoCLI as a live ACP agent. The agent has tool access
+  while the review is running — it can read additional files, run
+  `--lsp`-backed code-intel queries, run typecheck/lint via shell access,
+  etc. Slower + more tokens, but produces deeper structural review.
+
+Pick `proto` when you want the agent to actively investigate the codebase
+during review rather than just react to what's pre-inlined.
+
+### Configuration
+
+```bash
+clawpatch review --provider proto --model protolabs/reasoning
+```
+
+Or in `.clawpatch/config.json`:
+
+```json
+{
+  "provider": { "name": "proto", "model": "protolabs/reasoning" }
+}
+```
+
+### Environment
+
+| Variable                                                          | Default               | Notes                                                                                                                         |
+| ----------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_BASE_URL`                                                 | (proto default)       | Forwarded to protoCLI via env inheritance. Typically the LiteLLM gateway: `http://gateway:4000/v1` inside the docker network. |
+| `OPENAI_API_KEY`                                                  | (proto default)       | Bearer token protoCLI uses to authenticate to the model provider.                                                             |
+| `CLAWPATCH_PROTO_MODEL`                                           | `protolabs/reasoning` | Default model passed to `proto --acp -m <model>`. CLI `--model` flag overrides.                                               |
+| `CLAWPATCH_PROTO_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)      | Proto-specific timeout wins; provider-wide fallback applies if proto-specific is unset.                                       |
+
+### Requirements
+
+- `acpx` ≥ 0.10.0 installed and on PATH (the ACP driver)
+- `proto` (`@protolabsai/proto`) installed and on PATH (the agent it drives)
+
+`clawpatch doctor` validates both binaries with `--version` checks before
+spending any LLM tokens.
+
+## Gateway
+
+> Added in the protoLabs fork (`@protolabsai/protopatch`, 0.5.0). Not present
+> in upstream `openclaw/clawpatch`.
+
+POSTs the already-assembled prompt to any **OpenAI-compatible
+`/chat/completions` endpoint** with structured outputs
+(`response_format: json_schema`). No CLI subprocess, no auth handshake — just
+a Bearer token and a URL. The provider's `check()` validates env without
+making a network call so `clawpatch doctor` won't spend tokens on a probe.
+
+Designed for the protoLabs LiteLLM gateway:
+
+- inside the docker network: `http://gateway:4000/v1`
+- externally: `https://api.proto-labs.ai/v1`
+
+…but works against anything that speaks the OpenAI Chat Completions API:
+vanilla OpenAI, vLLM, LM Studio, Ollama with the OpenAI shim, etc.
+
+### When to use it
+
+Pick `gateway` over `claude` / `codex` / `acpx` when:
+
+- You are running clawpatch inside a container or CI runner where installing
+  - OAuth-ing a per-agent CLI is impractical.
+- You already have an OpenAI-compatible LLM endpoint and want a uniform
+  provider abstraction across multiple tools.
+- You want a provider that fails fast on auth and reports HTTP errors
+  verbatim instead of parsing a CLI's stdout envelope.
+
+### Configuration
+
+```bash
+clawpatch review --provider gateway --model protolabs/smart
+```
+
+Or set the provider once in `.clawpatch/config.json`:
+
+```json
+{
+  "provider": { "name": "gateway", "model": "protolabs/smart" }
+}
+```
+
+### Environment
+
+| Variable | Default | Notes |
+| ------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ------ | ------- | -------------------------------------------------------------------- |
+| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY` | required | Bearer token. The gateway provider refuses to start without one. |
+| `OPENAI_BASE_URL` | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped. |
+| `CLAWPATCH_GATEWAY_MODEL` | `protolabs/smart` | `--model` on the CLI overrides. |
+| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
+| `CLAWPATCH_GATEWAY_MAX_TOKENS` | unset | Sent as `max_tokens` when set to a positive integer (any other value is ignored with a warning). Unset sends none, so the backend's own output budget applies (a fixed cap could push prompt + output past a model's context window). |
+| `--reasoning-effort none                                            | minimal                        | low                                                                                                                                                                                                                                   | medium | high | xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
+
+### Failure handling
+
+A reply the gateway provider cannot use fails the call with exit `4`
+(`provider-failure`, unchanged), and the message names the failure:
+
+- `response truncated at the output limit` — the reply stopped with
+  `finish_reason: "length"`. The message carries `completion_tokens`,
+  `reasoning_tokens`, and `prompt_tokens` when the gateway reports them, so a
+  length cap (large `completion_tokens`) can be told apart from reasoning that
+  used up the budget (large `reasoning_tokens`, little or no content).
+- `empty choices[0].message.content in response`.
+- `response was not parseable JSON` — with `finish_reason=stop` this means the
+  backend did not enforce the JSON schema.
+
+During `review` / `ci`, empty and unparseable replies are retried within
+`CLAWPATCH_REVIEW_RETRIES` (default `1`). A truncated reply is not retried:
+the same prompt against the same cap is cut off again. The gateway timeout
+(`CLAWPATCH_GATEWAY_TIMEOUT_MS`) bounds the whole review call, retries
+included, and a retry is only made when the time left covers another attempt
+as long as the one that failed. The same rule holds for a reply of the wrong
+shape (exit `8`), and a retry cut off by the deadline reports the failure that
+prompted it, not the timeout. A caller that sizes its own budget from the
+timeout is therefore never overrun by a retry.
+
+Each of these failures also saves the full raw response body to
+`<state-dir>/provider-failures/` (the newest 20 are kept). The error message
+then reads
+`gateway review: full response saved to <path> — <failure> (<figures>)`: the
+failure and its figures come last, so they stay visible to a caller that keeps
+only the tail of stderr. JSON wrapped in a markdown fence,
+surrounded by prose, or following a leading `<think>…</think>` block is
+accepted as-is.
+
+### Why this can be the minimal provider
+
+The `buildReviewPrompt` / `buildMapPrompt` / `buildFixPrompt` helpers already
+inline the relevant file contents as `Files:` blocks in the prompt body. The
+gateway provider therefore needs zero file IO — it's effectively the smallest
+possible provider implementation: prompt in, JSON out. All schema enforcement
+happens via the same `response_format: json_schema` contract every other
+provider already negotiates.
+
+---
+
+Direct OpenAI API, local-model, and multi-model panel providers (other than
+`gateway`) are not implemented yet. The `acpx` provider is the generic route
+for ACP-compatible agents; the `grok`, `opencode`, `pi`, and `cursor`
+providers are direct integrations for local CLIs.

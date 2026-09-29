@@ -1,11 +1,38 @@
 # Changelog
 
-## 0.8.2 - Unreleased
+## Fork notice — 2026-05-24, rebased 2026-09-29
+
+This repository is `protoLabsAI/protoPatch`, a protoLabs-maintained fork of
+`openclaw/clawpatch`. The CLI binary stays as `clawpatch` for downstream
+compatibility; `protopatch` is also installed as an alias.
+
+Up to 0.6.4 the fork was a long-lived divergence with its own version stream.
+0.8.1 **rebases the fork onto upstream 0.8.1**: the version number now tracks the
+upstream release the fork is built on. The fork's additions live in their own
+adapter files (`src/providers/gateway.ts`, `src/providers/proto.ts`) instead of
+inside the provider monolith, so upstream changes merge without conflict.
+
+## 0.8.1 - Unreleased (protoLabs fork)
+
+- Rebased onto upstream `openclaw/clawpatch` 0.8.1 (159 upstream commits): the
+  provider split into `src/providers/*`, per-feature `review --feature-list`,
+  hardened state writes and stale-lock reclaim, bounded revalidation prompts,
+  committed-rename diff selection, mapper improvements, and the registry verifier.
+- Re-homed the `gateway` and `proto` providers as adapters in the new layout, with
+  all behaviour from 0.6.x kept: the undici agent that lifts the 300 s cutoff,
+  retryable unusable replies with a shared call deadline, failure captures under
+  `provider-failures/`, and the doubled-brace / leading-reasoning JSON recovery.
+- Gateway and proto timeouts now use upstream's bounded `providerTimeoutMs`, so an
+  oversized override falls back to the default instead of overflowing the timer.
+
+## Upstream history (openclaw/clawpatch)
+
+### 0.8.2 - Unreleased
 
 - Fixed non-Git patch audits to retain symlink edits and literal backslashes in Unix filenames without reading linked targets.
 - Fixed diff-scoped review, CI, and revalidation to include both paths of committed renames, preventing features mapped to the old path from being silently skipped.
 
-## 0.8.1 - 2026-09-13
+### 0.8.1 - 2026-09-13
 
 **Highlights:** Nested-project repairs stop tripping over sibling changes, and failed patch attempts keep the edits a provider already wrote.
 
@@ -19,7 +46,7 @@
 - Updated Zod and development tooling, aligned Node typings with the Node 22 floor, and added Node 22/24 runtime CI with pinned GitHub Actions.
 - Updated workflow and architecture docs to match current providers, explicit PR creation, validation order, and stale-lock recovery.
 
-## 0.8.0 - 2026-09-07
+### 0.8.0 - 2026-09-07
 
 **Highlights:** Opt-in HTTP context connects Node callers and Rust handlers during review.
 
@@ -28,7 +55,7 @@
 - Updated the pnpm GitHub Actions setup to 6.1.0.
 - Added shared-host scheduling headroom to timeout regression tests while retaining explicit bounded-return checks.
 
-## 0.7.3 - 2026-09-05
+### 0.7.3 - 2026-09-05
 
 **Highlights:** Broader Rust module coverage and bounded timeouts for Go discovery and pull-request publishing.
 
@@ -42,14 +69,14 @@
 - Updated pnpm, Node typings, formatter and linter tooling, Vitest 5/Vite, GitHub Actions dependencies, and the release workflow's npm CLI.
 - Bound npm trusted publishing to the `npm-release` GitHub environment and restored canonical package repository metadata.
 
-## 0.7.2 - 2026-08-01
+### 0.7.2 - 2026-08-01
 
 - Reclaimed dead same-host review locks automatically and added `clean-locks --stale-only` for safe scripted cleanup while preserving live and remote locks, thanks @goutamadwant.
 - Fixed diff-scoped review and CI runs to include changed features regardless of their previous review status, preventing warm-state gates from silently skipping changed code, thanks @youhaowei.
 - Updated pnpm, Node typings, formatter and linter tooling, and security and repository automation actions.
 - Added Rust seed context for Cargo manifests, paired crate entrypoints, and directly declared modules across crate roots and binary layouts, thanks @Tanmay-008.
 
-## 0.7.1 - 2026-07-20
+### 0.7.1 - 2026-07-20
 
 ### Highlights
 
@@ -57,25 +84,25 @@
 - Fixed revalidation prompts to compact historical and feature metadata and hard-cap metadata lists even when configured file limits are high, preventing provider input overflows, thanks @pai-scaffolde.
 - Added an opt-in Claude host auth context that preserves the default-deny environment, uses Claude Code safe mode, validates auth through doctor, and reports redacted OAuth failure signals, thanks @grantjayy.
 
-## 0.7.0 - 2026-06-15
+### 0.7.0 - 2026-06-15
 
 - Removed the direct MiniMax HTTP provider and its transport dependency; provider integrations are now explicitly limited to coding harnesses and agent CLIs.
 - Added uv workspace member mapping with repository-relative paths and member-local test commands while preserving mixed root source and test groups, thanks @srnm.
 - Fixed uv workspace mapping to preserve root features with member-associated tests and include workspace-root runtime metadata in member features, thanks @srnm.
 
-## 0.6.0 - 2026-06-11
+### 0.6.0 - 2026-06-11
 
 - Added trusted Codex CLI config passthrough for explicit config files while rejecting repository-controlled passthrough config, thanks @brad-ai-agent.
 - Added a MiniMax HTTP provider for `map`, `review`, and `revalidate`, with local schema validation and explicit unsupported `fix` handling, thanks @ferminquant.
 
-## 0.5.1 - 2026-06-10
+### 0.5.1 - 2026-06-10
 
 - Added npm trusted publishing through GitHub Actions OIDC, plus secops ownership, verified-secret scanning, and stale issue and pull request automation.
 - Added opt-in npm registry verification that drops only matching single-package, whole-title-and-reasoning public-npm publication claims when the exact version is confirmed published, thanks @coletebou.
 - Fixed revalidation to include linked patch attempts, validation results, feature context, and current relevant files so repaired findings can move out of `uncertain`.
 - Added `clawpatch review --feature-list <path>` for reviewing an explicit ordered, de-duplicated set of feature IDs, thanks @camwest.
 
-## 0.5.0 - 2026-05-31
+### 0.5.0 - 2026-05-31
 
 - Added CUDA support to the C/C++ mapper, mapping `.cu` and `.cuh` sources as standalone `main()` files, CMake and autotools targets, legacy `FindCUDA` `cuda_add_executable` / `cuda_add_library` calls, and bounded loose source groups.
 - Made `clawpatch review` and `clawpatch fix` CUDA-aware, injecting CUDA-specific guidance for features that own `.cu` or `.cuh` sources.
@@ -84,6 +111,109 @@
 - Fixed Claude provider auth isolation to pass explicit Vertex AI, Google ADC, and Bedrock/AWS auth environment variables, thanks @zanetworker.
 - Fixed Python review prompts to include target runtime metadata and avoid flagging Python 3.14 syntax such as PEP 758 exception handlers as invalid, thanks @rohitjavvadi.
 - Fixed mapper-generated validation commands to quote repository-derived paths, package names, script names, and test paths before shell execution, thanks @rohitjavvadi.
+
+## protoLabs fork history before the rebase (fork numbering)
+
+### 0.6.4 - Unreleased (protoLabs fork)
+
+- **provider(gateway)**: a gateway call is no longer cut off at 300 s. Node's
+  built-in `fetch` runs on undici's default Agent, whose `headersTimeout` and
+  `bodyTimeout` are 300 s, so any non-streaming completion slower than that died
+  as a bare `request failed (fetch failed)` — before the
+  `CLAWPATCH_GATEWAY_TIMEOUT_MS` deadline could fire, which made raising that
+  timeout past 300 s a no-op (pr-reviewer's structural lane lost ~1 in 4 passes
+  this way at 300–330 s, regardless of diff size). The gateway call now uses
+  undici's own `fetch` with an Agent whose timeouts match the deadline; the
+  deadline stays the single clock that ends a call. (An npm undici Agent handed
+  to Node 22's built-in fetch as `dispatcher` fails every request, so it is
+  undici's fetch, not the built-in one.) A replaced global `fetch` (test stubs,
+  embedders) is still used as-is. New dependency: `undici` ^8 (Node >= 22.19).
+- **provider(gateway)**: a transport failure names its cause —
+  `fetch failed: UND_ERR_SOCKET other side closed`, `…UND_ERR_HEADERS_TIMEOUT…`,
+  `…ECONNREFUSED…` — instead of every failure reading `fetch failed`.
+
+### 0.6.3 - Unreleased (protoLabs fork)
+
+- **provider**: `extractJson` recovers an answer wrapped in junk that balances
+  with it. `protolabs/smart` intermittently opens a structured reply with a
+  doubled brace (`{{"findings":…}})`, sometimes `{"{"findings":…`); the
+  balanced-brace scan skipped past the whole failed span and never tried the
+  valid object one character in, so the reply failed as
+  `response was not parseable JSON` (exit `4`) and the retry usually hit the same
+  shape. A second, descending scan now runs only when no top-level candidate
+  parses, so a draft object nested in a malformed preamble still never beats the
+  answer after it. All 25 captured live failures parse (36 findings recovered).
+
+### 0.6.2 - Unreleased (protoLabs fork)
+
+- **provider(gateway)**: an unusable model reply is reported for what it is.
+  A reply cut off at the output limit (`finish_reason: "length"`) fails with
+  `response truncated at the output limit` instead of
+  `response was not parseable JSON`, and every unusable-reply error carries
+  `finish_reason` and token usage (`completion_tokens`, `reasoning_tokens`,
+  `prompt_tokens`). Exit code (`4`) and error class (`provider-failure`) are
+  unchanged.
+- **provider(gateway)**: empty and unparseable replies are retried within
+  `CLAWPATCH_REVIEW_RETRIES`; before this, a gateway failure was never
+  retried. A truncated reply is not retried (the same cap cuts it off again).
+  `CLAWPATCH_GATEWAY_TIMEOUT_MS` now bounds a review call with its retries,
+  and a retry is only made when the time left covers another attempt as long
+  as the failed one, so a caller that sizes its budget from the timeout is
+  never overrun by a retry.
+- **provider(gateway)**: a reply of the wrong shape (exit `8`) follows the
+  same time rule, and a retry cut off by the deadline reports the failure that
+  prompted it (its own class and exit code) rather than the timeout.
+- **provider(gateway)**: the full raw response of a failed reply is saved to
+  `<state-dir>/provider-failures/` (newest 20 kept). The error names the file
+  first and ends with the failure and its figures, so both survive a caller
+  that keeps only the tail of stderr.
+- **provider(gateway)**: new `CLAWPATCH_GATEWAY_MAX_TOKENS` sends an explicit
+  `max_tokens`. Unset by default, so request bodies are unchanged; an invalid
+  value is ignored with a warning.
+- **provider(gateway)**: a 2xx body that is not JSON is a `provider-failure`
+  (exit `4`) instead of an uncaught `SyntaxError`.
+- **provider**: `extractJson` looks past a `<think>…</think>` block that
+  starts the reply, so a reasoning preamble with a stray `{` no longer hides
+  valid JSON. A reply that is valid JSON as a whole is always taken as-is.
+
+### 0.6.1 - Unreleased (protoLabs fork)
+
+- **provider**: added `proto` — drives the protoCLI agent
+  (`@protolabsai/proto`) over ACP via acpx's `--agent` escape hatch. Same
+  JSON-schema mechanics as the existing acpx provider, but uses
+  `acpx --agent "proto --acp -m <model>"` so we don't need acpx to ship
+  a `proto` subcommand upstream. Auth flows through protoCLI's
+  `--openai-base-url` / `--openai-api-key` env (typically set to the
+  LiteLLM gateway in deployed environments).
+- Env knobs:
+  `CLAWPATCH_PROTO_MODEL` default `protolabs/reasoning`
+  `CLAWPATCH_PROTO_TIMEOUT_MS` default 300000 (5 min);
+  `CLAWPATCH_PROVIDER_TIMEOUT_MS` is the
+  cross-provider fallback if proto-specific
+  is unset
+- `check()` validates both `acpx --version` AND `proto --version` so
+  `clawpatch doctor` catches missing-CLI bootstrap failures explicitly.
+
+### 0.5.0 - Unreleased (protoLabs fork)
+
+- **fork**: protoLabs took ownership 2026-05-24. Package renamed to
+  `@protolabsai/protopatch` on npm. Install via
+  `pnpm add -g @protolabsai/protopatch` (or
+  `pnpm add -g github:protoLabsAI/protoPatch` direct from this repo).
+- **provider**: added `gateway` — POSTs the assembled prompt to any
+  OpenAI-compatible `/chat/completions` endpoint with structured outputs
+  (`response_format: json_schema`). No CLI subprocess; no auth handshake.
+  Designed for the protoLabs LiteLLM gateway but works against any
+  OpenAI-compatible server (vanilla OpenAI, vLLM, LM Studio, Ollama with the
+  OpenAI shim). Env: `GATEWAY_API_KEY` (or `OPENAI_API_KEY`), `OPENAI_BASE_URL`
+  (default `https://api.proto-labs.ai/v1`), `CLAWPATCH_GATEWAY_MODEL`
+  (default `protolabs/smart`), `CLAWPATCH_GATEWAY_TIMEOUT_MS` (default 300000).
+  See [`docs/providers.md`](docs/providers.md#gateway).
+- **bin**: `protopatch` added as an alias alongside `clawpatch` — both
+  resolve to the same CLI entry. Useful when the upstream `clawpatch` is
+  also on PATH (e.g., during the migration window).
+
+### 0.4.1 - Unreleased
 
 ## 0.4.0 - 2026-05-22
 

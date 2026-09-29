@@ -6,10 +6,12 @@ import { acpxProvider, acpxTesting } from "./providers/acpx.js";
 import { claudeProvider, claudeTesting } from "./providers/claude.js";
 import { codexProvider, codexTesting } from "./providers/codex.js";
 import { cursorProvider, cursorTesting } from "./providers/cursor.js";
+import { gatewayProvider, gatewayTesting } from "./providers/gateway.js";
 import { grokProvider } from "./providers/grok.js";
 import { mockFailProvider, mockProvider } from "./providers/mock.js";
 import { opencodeProvider, opencodeTesting } from "./providers/opencode.js";
 import { piProvider, piTesting } from "./providers/pi.js";
+import { protoProvider, protoTesting } from "./providers/proto.js";
 
 export { extractJson } from "./provider-json.js";
 
@@ -18,11 +20,13 @@ const providers: Readonly<Record<string, Provider>> = {
   claude: claudeProvider,
   codex: codexProvider,
   cursor: cursorProvider,
+  gateway: gatewayProvider,
   grok: grokProvider,
   mock: mockProvider,
   "mock-fail": mockFailProvider,
   opencode: opencodeProvider,
   pi: piProvider,
+  proto: protoProvider,
 };
 
 export function providerByName(name: string): Provider {
@@ -38,8 +42,10 @@ export const providerTesting = {
   ...claudeTesting,
   ...codexTesting,
   ...cursorTesting,
+  ...gatewayTesting,
   ...opencodeTesting,
   ...piTesting,
+  ...protoTesting,
   providerExitCode,
   providerJsonSchema,
 };

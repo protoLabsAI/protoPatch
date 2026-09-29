@@ -47,6 +47,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.category }})
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # workspace-config: allow-hosted-runner CodeQL default setup requires hosted runner
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

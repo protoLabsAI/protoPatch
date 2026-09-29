@@ -1,0 +1,98 @@
+name: Publish to npm
+
+# Fires when a SemVer tag (v1.2.3) is pushed. Manual workflow_dispatch is
+# kept as an escape hatch — handy for re-publishing after a bad release
+# without having to delete + re-push the tag.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to publish (branch, tag, or SHA). Defaults to the workflow run ref."
+        required: false
+
+permissions:
+  contents: read
+  id-token: write # required for `npm publish --provenance`
+
+jobs:
+  publish:
+    name: publish ${{ github.ref_name }}
+    # workspace-config: allow-hosted-runner npm publish --provenance requires hosted OIDC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.1.2
+
+      - name: Setup Node + npm registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: pnpm
+          # registry-url is still required so npm publish targets the
+          # public registry. Trusted Publishing (configured on
+          # npmjs.com/package/@protolabsai/protopatch/access) authenticates
+          # this workflow via the OIDC token issued by `id-token: write`
+          # below — no NPM_TOKEN secret in play. The same OIDC token also
+          # supplies provenance.
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Build gate — refuse to publish a broken release. Mirrors ci.yml so
+      # the publish path can't accidentally diverge from the merge gate.
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Format check
+        run: pnpm format:check
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+      - name: Verify package.json version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match git tag ($TAG_VERSION)"
+            echo "Bump package.json and re-tag, or push a tag matching the package version."
+            exit 1
+          fi
+          echo "OK: package.json $PKG_VERSION == tag v$TAG_VERSION"
+
+      - name: Publish to npm
+        # Trusted Publishing: npm reads the GitHub OIDC token from
+        # id-token: write and exchanges it for a short-lived publish
+        # credential — no NPM_TOKEN secret required. --provenance attests
+        # this build came from this workflow on this ref, a public,
+        # tamper-evident chain of custody.
+        #
+        # Prerequisite (one-time, npm UI):
+        #   npmjs.com/package/@protolabsai/protopatch/access →
+        #     Trusted Publishers → Add → GitHub Actions
+        #     repository:        protoLabsAI/protoPatch
+        #     workflow filename: publish.yml
+        #     environment:       (leave blank — none configured)
+        run: |
+          # setup-node writes a placeholder //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+          # into $NPM_CONFIG_USERCONFIG. npm then treats the registry as already having a
+          # credential and never starts the Trusted Publishing exchange: the publish dies as
+          # a bare E404 on the PUT, with no OIDC line anywhere in the log. Deleting the entry
+          # is what makes npm exchange the GitHub OIDC token for a publish credential, and
+          # makes a rejection report itself as an auth failure instead of a missing package.
+          npm config delete //registry.npmjs.org/:_authToken --location=user || true
+          npm publish --provenance --access public
