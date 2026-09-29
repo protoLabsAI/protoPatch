@@ -1,3 +1,4 @@
+import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __testing as appTesting, AppContext } from "./app.js";
 import { ClawpatchError } from "./errors.js";
@@ -396,6 +397,18 @@ function stubTimedGatewayFetch(replies: Array<{ body: string; delayMs: number }>
   return fetchMock;
 }
 
+// Real HTTP, no fetch stub: the call goes through undici's fetch with an Agent
+// sized to the deadline (Node's default Agent cut every reply off at 300 s as a
+// bare "fetch failed", under any CLAWPATCH_GATEWAY_TIMEOUT_MS).
+async function serve(handler: Parameters<typeof createServer>[1]): Promise<Server> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no port");
+  process.env["OPENAI_BASE_URL"] = `http://127.0.0.1:${address.port}/v1`;
+  return server;
+}
+
 // End to end through the real gateway provider with fetch stubbed: an
 // unusable reply (truncated at the output limit) is retried within
 // CLAWPATCH_REVIEW_RETRIES, and an exhausted retry still exits 4 /
@@ -527,6 +540,56 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
     const result = await run();
     expect(result.inspected.notes).toEqual(["ok"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reaches a real gateway over HTTP when fetch is not replaced", async () => {
+    const server = await serve((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(gatewayReply(CLEAN, "stop"));
+      }, 50);
+    });
+    try {
+      const result = await run();
+      expect(result.inspected.notes).toEqual(["ok"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("names the transport failure instead of a bare 'fetch failed'", async () => {
+    process.env["CLAWPATCH_REVIEW_RETRIES"] = "0";
+    const server = await serve((req) => {
+      req.socket.destroy();
+    });
+    try {
+      const error = await run().then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(ClawpatchError);
+      expect((error as ClawpatchError).code).toBe("provider-failure");
+      expect((error as ClawpatchError).message).toMatch(/request failed \(fetch failed: \S/);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("ends a slow real call at the configured deadline", async () => {
+    process.env["CLAWPATCH_GATEWAY_TIMEOUT_MS"] = "300";
+    process.env["CLAWPATCH_REVIEW_RETRIES"] = "0";
+    const server = await serve((_req, res) => {
+      const timer = setTimeout(() => res.end(gatewayReply(CLEAN, "stop")), 5000);
+      res.on("close", () => clearTimeout(timer));
+    });
+    try {
+      const started = Date.now();
+      await expect(run()).rejects.toThrow("no reply within the 300ms gateway timeout");
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 
   it("reports the wrong-shape reply, not the timeout, when the retry runs out of time", async () => {
