@@ -577,7 +577,11 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
     });
     try {
       const started = Date.now();
-      await expect(run()).rejects.toThrow("no reply within the 300ms gateway timeout");
+      // The budget can be a few ms short of the full 300 by the time the attempt starts,
+      // which the message states ("no reply within the 297ms left of the 300ms …").
+      await expect(run()).rejects.toThrow(
+        /no reply within the (?:\d+ms left of the )?300ms gateway timeout/u,
+      );
       expect(Date.now() - started).toBeLessThan(2000);
     } finally {
       server.closeAllConnections();
