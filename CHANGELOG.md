@@ -24,6 +24,9 @@ inside the provider monolith, so upstream changes merge without conflict.
   `provider-failures/`, and the doubled-brace / leading-reasoning JSON recovery.
 - Gateway and proto timeouts now use upstream's bounded `providerTimeoutMs`, so an
   oversized override falls back to the default instead of overflowing the timer.
+- `proto` provider: refuse a model id that is not a plain `provider/name:tag@version`
+  token, since it is interpolated into the single command string acpx splits
+  (found by the Vera review of the rebase).
 
 ## Upstream history (openclaw/clawpatch)
 

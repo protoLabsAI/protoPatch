@@ -1835,6 +1835,43 @@ describe("proto provider helpers", () => {
     expect(fromEnv).toBe("proto --acp -m env-model");
   });
 
+  it("protoAgentCommand refuses a model id that could smuggle shell syntax", () => {
+    for (const model of ["m; touch x", "m $(id)", "m`id`", "a b", "m'x", '"m"', "-m", "m\nx", ""]) {
+      expect(() =>
+        gatewayAndProtoTesting.protoAgentCommand({
+          model,
+          reasoningEffort: null,
+          skipGitRepoCheck: false,
+        }),
+      ).toThrow(/refusing model/u);
+    }
+    process.env["CLAWPATCH_PROTO_MODEL"] = "x;y";
+    expect(() =>
+      gatewayAndProtoTesting.protoAgentCommand({
+        model: null,
+        reasoningEffort: null,
+        skipGitRepoCheck: false,
+      }),
+    ).toThrow(/refusing model/u);
+  });
+
+  it("protoAgentCommand accepts real model ids", () => {
+    for (const model of [
+      "protolabs/reasoning",
+      "gpt-5.1",
+      "anthropic/claude-sonnet-4:beta",
+      "m@1.2+x",
+    ]) {
+      expect(
+        gatewayAndProtoTesting.protoAgentCommand({
+          model,
+          reasoningEffort: null,
+          skipGitRepoCheck: false,
+        }),
+      ).toBe(`proto --acp -m ${model}`);
+    }
+  });
+
   it("buildProtoAcpxArgs (read mode) uses --agent escape hatch and approve-reads", () => {
     // eslint-disable-next-line no-underscore-dangle
     const args = gatewayAndProtoTesting.buildProtoAcpxArgs(
