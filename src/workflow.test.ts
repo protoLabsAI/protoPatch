@@ -41,6 +41,7 @@ import { mapWithSource } from "./agent-mapper.js";
 import { mapFeatures } from "./mapper.js";
 import {
   claimFeature,
+  isStaleLocalFeatureLock,
   releaseFeatureLock,
   readFeatures,
   readFinding,
@@ -1941,6 +1942,83 @@ describe("workflow", () => {
     expect(await readdir(paths.locks)).toEqual(
       features.map((feature) => `${feature.featureId}.json`).toSorted(),
     );
+  });
+
+  it("reclaims a remote-host lock once it is older than the foreign-lock age", async () => {
+    // A container recreate changes the hostname, so a run killed mid-review leaves a lock
+    // no pid check can clear; past the age bound it is reclaimed instead of failing exit 7.
+    const root = await fixtureRoot("clawpatch-aged-remote-lock-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "aged-remote-lock", bin: { tool: "src/tool.ts" } }),
+    );
+    await writeFixture(root, "src/tool.ts", "export const tool = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+    await initCommand(context, {});
+    await mapCommand(context);
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    const orphaned = {
+      lockedByRunId: "killed-by-redeploy",
+      lockedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      hostname: "old-container",
+      pid: 594031,
+    };
+    await writeFeature(paths, {
+      ...feature!,
+      status: "claimed",
+      lock: orphaned,
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFixture(
+      root,
+      `.clawpatch/locks/${feature!.featureId}.json`,
+      `${JSON.stringify(orphaned, null, 2)}\n`,
+    );
+
+    const claimed = await claimFeature(
+      paths,
+      feature!.featureId,
+      {
+        lockedByRunId: "run-next",
+        lockedAt: new Date().toISOString(),
+        hostname: "new-container",
+        pid: 7,
+      },
+      { staleLock: { hostname: "new-container", isPidAlive: () => true } },
+    );
+
+    expect(claimed.lock).toMatchObject({ lockedByRunId: "run-next" });
+  });
+
+  it("decides lock staleness by pid on the same host and by age on another host", () => {
+    const now = Date.parse("2026-09-29T23:00:00Z");
+    const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
+    const opts = (alive: boolean) => ({
+      hostname: "here",
+      isPidAlive: () => alive,
+      maxForeignLockAgeMs: 120 * 60_000,
+      now: () => now,
+    });
+    const lock = (hostname: string, minutesAgo: number) => ({
+      lockedByRunId: "r",
+      lockedAt: at(minutesAgo),
+      hostname,
+      pid: 1,
+    });
+    // Same host: pid decides, age never does.
+    expect(isStaleLocalFeatureLock(lock("here", 600), opts(true))).toBe(false);
+    expect(isStaleLocalFeatureLock(lock("here", 1), opts(false))).toBe(true);
+    // Another host: fresh stays, aged is reclaimed, unparseable lockedAt stays.
+    expect(isStaleLocalFeatureLock(lock("there", 30), opts(false))).toBe(false);
+    expect(isStaleLocalFeatureLock(lock("there", 121), opts(false))).toBe(true);
+    expect(
+      isStaleLocalFeatureLock({ ...lock("there", 0), lockedAt: "not-a-date" }, opts(false)),
+    ).toBe(false);
   });
 
   it("does not claim a stale feature after another run finishes it", async () => {

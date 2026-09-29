@@ -36,7 +36,26 @@ type FeatureLock = NonNullable<FeatureRecord["lock"]>;
 export type FeatureLockReclaimOptions = {
   hostname?: string;
   isPidAlive?: (pid: number) => boolean;
+  /** Age after which a lock written on ANOTHER host is treated as abandoned. */
+  maxForeignLockAgeMs?: number;
+  now?: () => number;
 };
+
+// A lock written on another host can't be pid-checked. In a container every recreate
+// changes the hostname, so a run killed by a redeploy (or by a supervisor's SIGKILL on a
+// previous container) left a lock nothing would ever reclaim, and every later run that
+// needed that feature failed with `feature locked` (exit 7). Past this age no live run
+// can still hold it: a review is bounded by the provider timeout, minutes not hours.
+const DEFAULT_MAX_FOREIGN_LOCK_AGE_MS = 2 * 60 * 60 * 1000;
+
+function maxForeignLockAgeMs(options: FeatureLockReclaimOptions): number {
+  if (options.maxForeignLockAgeMs !== undefined) {
+    return options.maxForeignLockAgeMs;
+  }
+  const raw = process.env["CLAWPATCH_LOCK_STALE_MS"];
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_FOREIGN_LOCK_AGE_MS;
+}
 
 type ClaimFeatureOptions = {
   allowNonPending?: boolean;
@@ -396,7 +415,16 @@ export function isStaleLocalFeatureLock(
 ): boolean {
   const currentHostname = options.hostname ?? osHostname();
   const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
-  return lock.hostname === currentHostname && !isPidAlive(lock.pid);
+  if (lock.hostname === currentHostname) {
+    // Same host: the pid is authoritative — a live run keeps its lock however old.
+    return !isPidAlive(lock.pid);
+  }
+  const lockedAt = Date.parse(lock.lockedAt);
+  if (!Number.isFinite(lockedAt)) {
+    return false;
+  }
+  const now = (options.now ?? Date.now)();
+  return now - lockedAt > maxForeignLockAgeMs(options);
 }
 
 function defaultIsPidAlive(pid: number): boolean {
