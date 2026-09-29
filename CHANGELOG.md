@@ -8,6 +8,24 @@ to make our releases unambiguous against upstream. The CLI binary stays as
 `clawpatch` for downstream compatibility; `protopatch` is also installed as
 an alias for explicitness.
 
+## 0.6.4 - Unreleased (protoLabs fork)
+
+- **provider(gateway)**: a gateway call is no longer cut off at 300 s. Node's
+  built-in `fetch` runs on undici's default Agent, whose `headersTimeout` and
+  `bodyTimeout` are 300 s, so any non-streaming completion slower than that died
+  as a bare `request failed (fetch failed)` — before the
+  `CLAWPATCH_GATEWAY_TIMEOUT_MS` deadline could fire, which made raising that
+  timeout past 300 s a no-op (pr-reviewer's structural lane lost ~1 in 4 passes
+  this way at 300–330 s, regardless of diff size). The gateway call now uses
+  undici's own `fetch` with an Agent whose timeouts match the deadline; the
+  deadline stays the single clock that ends a call. (An npm undici Agent handed
+  to Node 22's built-in fetch as `dispatcher` fails every request, so it is
+  undici's fetch, not the built-in one.) A replaced global `fetch` (test stubs,
+  embedders) is still used as-is. New dependency: `undici` ^8 (Node >= 22.19).
+- **provider(gateway)**: a transport failure names its cause —
+  `fetch failed: UND_ERR_SOCKET other side closed`, `…UND_ERR_HEADERS_TIMEOUT…`,
+  `…ECONNREFUSED…` — instead of every failure reading `fetch failed`.
+
 ## 0.6.3 - Unreleased (protoLabs fork)
 
 - **provider**: `extractJson` recovers an answer wrapped in junk that balances

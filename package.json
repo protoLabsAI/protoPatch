@@ -1,6 +1,6 @@
 {
   "name": "@protolabsai/protopatch",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
   "homepage": "https://github.com/protoLabsAI/protoPatch#readme",
   "bugs": {
@@ -43,6 +43,7 @@
     "crabbox:warmup": "crabbox warmup"
   },
   "dependencies": {
+    "undici": "^8.11.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -53,7 +54,7 @@
     "vitest": "^4.1.6"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "packageManager": "pnpm@11.1.2"
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Agent, fetch as undiciFetch } from "undici";
 import { z, type ZodError, type ZodIssue, type ZodType } from "zod";
 import { runCommandArgs } from "./exec.js";
 import { ClawpatchError } from "./errors.js";
@@ -1670,15 +1671,19 @@ async function runGatewayJson(
   let response: Response;
   let rawBody: string;
   try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`,
+    response = await gatewayFetch(
+      `${config.baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
       },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+      config.timeoutMs,
+    );
     // Read the body as text, inside the timeout window: a failed reply is
     // captured verbatim, and a body that is not JSON is a typed failure
     // rather than a stray SyntaxError.
@@ -1687,9 +1692,7 @@ async function runGatewayJson(
     const aborted = controller.signal.aborted;
     const msg = aborted
       ? gatewayTimeoutMessage(Math.max(0, deadline - attemptStartedAt), config.timeoutMs)
-      : err instanceof Error
-        ? err.message
-        : String(err);
+      : fetchErrorMessage(err);
     throw new ClawpatchError(`gateway ${label}: request failed (${msg})`, 4, "provider-failure", {
       deadlineExceeded: aborted,
     });
@@ -1748,6 +1751,64 @@ function gatewayRetryFits(
 
 // States the budget the attempt actually had: a retry only gets what is left
 // of the call's shared deadline.
+// Node's built-in fetch runs on undici's default Agent, whose headersTimeout and
+// bodyTimeout are 300 s. A non-streaming completion that takes longer than that
+// to return headers was killed at 300 s as a bare "fetch failed", before the
+// CLAWPATCH_GATEWAY_TIMEOUT_MS deadline below ever fired — so raising the
+// timeout past 300 s did nothing. The gateway call therefore goes through
+// undici's own fetch with an Agent whose timeouts match the deadline; the
+// AbortController stays the one clock that ends a call. (undici's fetch, not
+// the built-in one with a `dispatcher`: an npm undici Agent handed to Node 22's
+// bundled undici 6 fetch fails every request with "invalid onRequestStart
+// method".)
+const builtinFetch = globalThis.fetch;
+const gatewayAgents = new Map<number, Agent>();
+
+function gatewayAgent(timeoutMs: number): Agent {
+  let agent = gatewayAgents.get(timeoutMs);
+  if (agent === undefined) {
+    agent = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    gatewayAgents.set(timeoutMs, agent);
+  }
+  return agent;
+}
+
+type GatewayRequest = {
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+  signal: AbortSignal;
+};
+
+function gatewayFetch(url: string, init: GatewayRequest, timeoutMs: number): Promise<Response> {
+  // A replaced global fetch (a test stub, an embedder's shim) is honoured as-is.
+  if (globalThis.fetch !== builtinFetch) {
+    return globalThis.fetch(url, init);
+  }
+  return undiciFetch(url, {
+    method: init.method,
+    headers: init.headers,
+    body: init.body,
+    signal: init.signal,
+    dispatcher: gatewayAgent(timeoutMs),
+  }) as unknown as Promise<Response>;
+}
+
+// undici reports every transport failure as `TypeError: fetch failed` and puts
+// the reason (headers timeout, socket closed, connection refused, TLS) on
+// `cause` — keep it, or every failure reads the same.
+function fetchErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return String(err);
+  }
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    const code = (cause as { code?: unknown }).code;
+    return `${err.message}: ${typeof code === "string" ? `${code} ` : ""}${cause.message}`;
+  }
+  return err.message;
+}
+
 function gatewayTimeoutMessage(budgetMs: number, timeoutMs: number): string {
   return budgetMs < timeoutMs
     ? `no reply within the ${budgetMs}ms left of the ${timeoutMs}ms gateway timeout`
