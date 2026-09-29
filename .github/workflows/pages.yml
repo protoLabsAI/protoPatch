@@ -20,6 +20,8 @@ concurrency:
 
 jobs:
   deploy:
+    # Upstream's docs site; this fork has no Pages site.
+    if: github.repository == 'openclaw/clawpatch'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
