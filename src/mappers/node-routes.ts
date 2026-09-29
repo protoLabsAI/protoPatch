@@ -1,21 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
-  dependencyFieldHas,
+  packageHasDependency,
   packageRelativePath,
   projectContextFiles,
   projectTags,
   projectTargetCommand,
 } from "./projects.js";
-import { pathMatchesPrefix, walk } from "./shared.js";
-import {
-  FeatureSeed,
-  MapperContext,
-  SeedFileRef,
-  SeedTestRef,
-  suppressedTestCommandTag,
-} from "./types.js";
+import { uniqueFileRefs, pathMatchesPrefix, walk } from "./shared.js";
+import { FeatureSeed, MapperContext, SeedTestRef, suppressedTestCommandTag } from "./types.js";
 import type { NodeProjectInfo } from "./projects.js";
+import type { WorkspaceTaskGraph } from "./task-graph.js";
 
 type ServerFramework = "express" | "fastify" | "hono";
 
@@ -80,18 +75,20 @@ const routeChainPattern =
   /(^|[^A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\.\s*route\s*\(/gu;
 
 export async function nodeRouteSeeds(root: string, context: MapperContext): Promise<FeatureSeed[]> {
+  const projects = await context.nodeProjects();
+  const taskGraph = await context.nodeTaskGraph();
   const seeds: FeatureSeed[] = [];
-  const rootFrameworks = serverFrameworks(
-    context.projects.find((project) => project.root === ".") ?? null,
-  );
-  for (const project of context.projects) {
+  const rootFrameworks = serverFrameworks(projects.find((project) => project.root === ".") ?? null);
+  for (const project of projects) {
     const frameworks = serverFrameworks(project);
     const effectiveFrameworks =
       frameworks.length > 0 ? frameworks : project.packageJson === null ? rootFrameworks : [];
     if (effectiveFrameworks.length === 0) {
       continue;
     }
-    seeds.push(...(await projectRouteSeeds(root, project, context, effectiveFrameworks)));
+    seeds.push(
+      ...(await projectRouteSeeds(root, project, projects, taskGraph, effectiveFrameworks)),
+    );
   }
   return seeds;
 }
@@ -101,29 +98,20 @@ function serverFrameworks(project: NodeProjectInfo | null): ServerFramework[] {
     return [];
   }
   return (["express", "fastify", "hono"] as const).filter((framework) =>
-    packageHasDependency(project, framework),
-  );
-}
-
-function packageHasDependency(project: NodeProjectInfo, dependency: string): boolean {
-  const pkg = project.packageJson as Record<string, unknown> | null;
-  if (pkg === null) {
-    return false;
-  }
-  return ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].some(
-    (field) => dependencyFieldHas(pkg[field], dependency),
+    packageHasDependency(project.packageJson, framework),
   );
 }
 
 async function projectRouteSeeds(
   root: string,
   project: NodeProjectInfo,
-  context: MapperContext,
+  projects: NodeProjectInfo[],
+  taskGraph: WorkspaceTaskGraph,
   frameworks: ServerFramework[],
 ): Promise<FeatureSeed[]> {
-  const files = await packageSourceFiles(root, project, context.projects);
-  const tests = await packageTestFiles(root, project, context.projects);
-  const testCommand = projectTargetCommand(project, "test", context.taskGraph);
+  const files = await packageSourceFiles(root, project, projects);
+  const tests = await packageTestFiles(root, project, projects);
+  const testCommand = projectTargetCommand(project, "test", taskGraph);
   const projectContext = await projectContextFiles(root, project);
   const seeds: FeatureSeed[] = [];
 
@@ -2005,19 +1993,6 @@ function uniqueRoutes(routes: ServerRoute[]): ServerRoute[] {
     }
     seen.add(key);
     output.push(route);
-  }
-  return output;
-}
-
-function uniqueFileRefs(refs: SeedFileRef[]): SeedFileRef[] {
-  const seen = new Set<string>();
-  const output: SeedFileRef[] = [];
-  for (const ref of refs) {
-    if (seen.has(ref.path)) {
-      continue;
-    }
-    seen.add(ref.path);
-    output.push(ref);
   }
   return output;
 }

@@ -5,6 +5,7 @@ import { pathExists } from "../fs.js";
 import { rubyDependencyNames, rubyGemspecPaths, stripRubyComments } from "../ruby.js";
 import { partitionFileGroups } from "./grouping.js";
 import {
+  uniqueFileRefs,
   normalize,
   packageKind,
   packageTrustBoundaries,
@@ -67,11 +68,13 @@ const semanticSourceSegments = [
 export async function nodeSeeds(root: string, context: MapperContext): Promise<FeatureSeed[]> {
   const seeds: FeatureSeed[] = [];
 
-  for (const info of context.projects) {
+  const projects = await context.nodeProjects();
+  const taskGraph = await context.nodeTaskGraph();
+  for (const info of projects) {
     if (hasNodePackage(info)) {
-      seeds.push(...(await packageSeeds(root, info, context.taskGraph)));
+      seeds.push(...(await packageSeeds(root, info, taskGraph)));
     }
-    seeds.push(...(await sourceGroupSeeds(root, info, context.taskGraph)));
+    seeds.push(...(await sourceGroupSeeds(root, info, taskGraph)));
   }
 
   return seeds;
@@ -669,17 +672,4 @@ function isExtensionPackage(info: PackageInfo): boolean {
 
 function isNodeTestPath(path: string): boolean {
   return /\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/u.test(path);
-}
-
-function uniqueFileRefs(refs: SeedFileRef[]): SeedFileRef[] {
-  const seen = new Set<string>();
-  const output: SeedFileRef[] = [];
-  for (const ref of refs) {
-    if (seen.has(ref.path)) {
-      continue;
-    }
-    seen.add(ref.path);
-    output.push(ref);
-  }
-  return output;
 }

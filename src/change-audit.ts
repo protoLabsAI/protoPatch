@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readdir, readlink } from "node:fs/promises";
 import { relative, resolve } from "node:path";
-import { runCommand } from "./exec.js";
+import { ClawpatchError } from "./errors.js";
+import { dirtyFiles } from "./git.js";
 
 export async function hasSourceDirtyWorktree(root: string, stateDir: string): Promise<boolean> {
   const paths = await sourceChangedPaths(root, stateDir);
@@ -12,7 +13,7 @@ export async function hasSourceDirtyWorktree(root: string, stateDir: string): Pr
 export async function sourceChangedSnapshots(
   root: string,
   stateDir: string,
-): Promise<Map<string, string> | null> {
+): Promise<Map<string, string>> {
   const paths =
     (await sourceChangedPaths(root, stateDir)) ?? (await sourceSnapshotPaths(root, stateDir));
   const snapshots = new Map<string, string>();
@@ -32,18 +33,17 @@ export function changedPathsBetweenSnapshots(
 }
 
 async function sourceChangedPaths(root: string, stateDir: string): Promise<Set<string> | null> {
-  const result = await runCommand("git status --porcelain=v1 -z -uall", root, undefined, {
-    trimOutput: false,
-  });
-  if (result.exitCode !== 0) {
-    return null;
+  let paths: Set<string>;
+  try {
+    paths = await dirtyFiles(root);
+  } catch (error) {
+    if (error instanceof ClawpatchError && error.code === "git-failure") {
+      return null;
+    }
+    throw error;
   }
   const relativeStateDir = normalizePath(relative(root, stateDir));
-  return new Set(
-    parsePorcelainPaths(result.stdout).filter(
-      (path) => path.length > 0 && !isStatePath(path, relativeStateDir),
-    ),
-  );
+  return new Set([...paths].filter((path) => !isStatePath(path, relativeStateDir)));
 }
 
 async function pathFingerprint(root: string, path: string): Promise<string> {
@@ -67,24 +67,6 @@ async function pathFingerprint(root: string, path: string): Promise<string> {
     return "unreadable";
   }
   return `file:${info.mode}:${info.size}:${hash.digest("hex")}`;
-}
-
-function parsePorcelainPaths(output: string): string[] {
-  const fields = output.split("\0").filter((field) => field.length > 0);
-  const paths: string[] = [];
-  for (let index = 0; index < fields.length; index += 1) {
-    const field = fields[index] ?? "";
-    if (field.length < 4) {
-      continue;
-    }
-    const status = field.slice(0, 2);
-    const path = normalizePath(field.slice(3));
-    paths.push(path);
-    if (/[RC]/u.test(status)) {
-      index += 1;
-    }
-  }
-  return paths;
 }
 
 function isStatePath(path: string, relativeStateDir: string): boolean {
@@ -115,12 +97,12 @@ async function collectSnapshotPaths(
       continue;
     }
     const info = await lstat(full).catch(() => null);
-    if (info === null || info.isSymbolicLink()) {
+    if (info === null) {
       continue;
     }
     if (info.isDirectory()) {
       await collectSnapshotPaths(root, full, relativeStateDir, paths);
-    } else if (info.isFile()) {
+    } else if (info.isFile() || info.isSymbolicLink()) {
       paths.add(path);
     }
   }
@@ -138,5 +120,5 @@ function shouldSkipSnapshotPath(path: string, relativeStateDir: string): boolean
 }
 
 function normalizePath(path: string): string {
-  return path.replace(/\\/gu, "/").replace(/\/$/u, "");
+  return process.platform === "win32" ? path.replace(/\\/gu, "/") : path;
 }

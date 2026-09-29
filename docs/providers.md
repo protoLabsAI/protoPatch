@@ -7,9 +7,18 @@ description: "AI provider configuration and model selection"
 
 The default provider is the local Codex CLI.
 
+Clawpatch integrates coding harnesses and agent CLIs only. Direct model API
+providers are out of scope; see the project [vision](../VISION.md).
+
 ```bash
 clawpatch doctor
 ```
+
+`doctor` loads configuration before checking whether project state exists, so
+`--config`, `CLAWPATCH_CONFIG`, and discovered project config also work before
+`init`. Provider, model, and reasoning flags override environment and config
+settings in the same order as review. Unknown provider names are rejected before
+invoking a harness.
 
 Provider names today:
 
@@ -30,6 +39,10 @@ Provider names today:
 - `mock`: deterministic provider for tests and fixtures
 - `mock-fail`: failure provider for tests
 
+Timeout overrides must be between `1` and `2147483647` milliseconds. Invalid
+values use the default and fractional values are truncated. A provider-specific
+timeout takes precedence over `CLAWPATCH_PROVIDER_TIMEOUT_MS`.
+
 ## Codex
 
 Codex invocation:
@@ -39,6 +52,8 @@ Codex invocation:
 - fix: workspace-write sandbox
 - output: strict JSON schema via `--output-schema`
 - final message capture: `--output-last-message`
+- timeout: 300 seconds by default, matching the Cursor provider; override with
+  `CLAWPATCH_CODEX_TIMEOUT_MS` or `CLAWPATCH_PROVIDER_TIMEOUT_MS`
 
 Model selection:
 
@@ -57,6 +72,32 @@ CLAWPATCH_REASONING_EFFORT=xhigh clawpatch review
 When `reasoningEffort` is unset, Clawpatch does not pass a reasoning override
 and Codex uses its own configured default. Explicit values are passed to Codex
 as `model_reasoning_effort`.
+
+Trusted Codex CLI config passthrough:
+
+```json
+{
+  "provider": {
+    "name": "codex",
+    "model": null,
+    "reasoningEffort": null,
+    "codexConfig": {
+      "model_provider": "local",
+      "model_providers.local.base_url": "https://example.invalid/v1",
+      "model_providers.local.env_key": "CLAWPATCH_CODEX_API_KEY"
+    }
+  }
+}
+```
+
+Load a config like this with `clawpatch --config trusted-config.json ...` or
+`CLAWPATCH_CONFIG=trusted-config.json`. Clawpatch rejects non-empty
+`provider.codexConfig` from auto-discovered repository or state config files so
+a checkout cannot silently redirect Codex provider routing or credential lookup.
+Values are limited to strings, finite numbers, booleans, and `null`, then passed
+as repeated `-c key=value` arguments before `--model` and reasoning overrides.
+Do not place raw secrets in `codexConfig`; point Codex at an explicit env var
+instead.
 
 ## OpenCode
 
@@ -120,12 +161,25 @@ The `claude` provider shells out to the local
 [Claude Code CLI](https://code.claude.com/docs/en/cli-usage) in non-interactive
 print mode.
 
-Install Claude Code and authenticate with an Anthropic API key:
+Install Claude Code. The default isolated mode accepts an Anthropic API key or
+the supported cloud-provider auth variables:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 claude --version
 ```
+
+To use the configured Claude Code binary's `/login` or setup-token auth state,
+opt into host auth context:
+
+```bash
+CLAWPATCH_CLAUDE_AUTH_CONTEXT=host clawpatch doctor --provider claude
+CLAWPATCH_CLAUDE_AUTH_CONTEXT=host clawpatch review --provider claude
+```
+
+Host auth context requires Claude Code 2.1.169 or newer.
+Set `CLAWPATCH_CLAUDE_BIN` to an executable path when Clawpatch should invoke a
+specific Claude Code installation.
 
 Provider selection:
 
@@ -144,14 +198,28 @@ clawpatch review --provider claude --model claude-haiku-4-5-20251001 --limit 1
 
 How the Claude provider works:
 
-- Doctor: `clawpatch doctor --provider claude` only checks that the Claude Code
+- Doctor: `clawpatch doctor --provider claude` checks that the Claude Code
   binary is available, reads `claude --version`, and blocks known vulnerable
-  versions. It does not validate auth or make a network call; auth failures are
-  reported on the first provider-backed command.
+  versions. In host auth context it also runs one minimal structured provider
+  query through the same auth/runtime boundary; this makes a network request
+  and may consume provider credits.
 - Auth/isolation: provider runs use `--bare` with a default-deny environment.
-  Clawpatch forwards only minimal execution variables and `ANTHROPIC_API_KEY`;
-  it does not pass host `HOME`, OAuth/keychain state, or whole Claude
-  config/cache directories.
+  Clawpatch forwards only minimal execution variables plus explicit Anthropic
+  API key, Vertex AI, Google ADC, cloud-gateway, and Bedrock/AWS auth variables.
+  It does not pass host `HOME`, OAuth/keychain state, or whole Claude
+  config/cache directories; OAuth subscription auth is not available in Claude
+  Code `--bare` mode. Cloud auth env is available to Claude Code itself, while
+  Claude tool subprocess env scrubbing is enabled. AWS profile names are
+  forwarded only when `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` points
+  at explicit profile files.
+- Host auth context: `CLAWPATCH_CLAUDE_AUTH_CONTEXT=host` replaces `--bare`
+  with Claude Code `--safe-mode`, exposes only the host `HOME`/`USERPROFILE`
+  and optional `CLAUDE_CONFIG_DIR` auth locators, and permits
+  `CLAUDE_CODE_OAUTH_TOKEN`. It does not inherit the whole host environment;
+  the auth allowlist, temporary XDG/cache/data directories, subprocess env
+  scrubbing, tool limits, empty strict MCP config, disabled slash commands,
+  and disabled browser integration remain in force. `--safe-mode` disables
+  user and repository customizations while retaining normal authentication.
 - Structured output: provider runs use `--output-format json --json-schema`
   and parse the returned `structured_output` field.
 - Read-only operations (map, review, revalidate): use
@@ -170,10 +238,12 @@ How the Claude provider works:
 - Timeout: 180 seconds by default, override with `CLAWPATCH_CLAUDE_TIMEOUT_MS`
   or `CLAWPATCH_PROVIDER_TIMEOUT_MS`.
 
-Permission caveat: Claude tool restrictions are enforced by Claude Code. For
-write operations during `fix`, Claude may edit the current worktree. For
-untrusted code, run `clawpatch fix --provider claude` inside an isolated
-checkout.
+Permission caveat: Claude tool restrictions are enforced by Claude Code, and
+safe mode is configuration isolation rather than an OS sandbox. Host auth
+context makes the host auth locator visible to the Claude process; use it only
+for trusted repositories. For write operations during `fix`, Claude may edit
+the current worktree. For untrusted code, keep the default isolated auth
+context and run `clawpatch fix --provider claude` inside an isolated checkout.
 
 ## Grok
 
@@ -426,13 +496,13 @@ Or set the provider once in `.clawpatch/config.json`:
 
 ### Environment
 
-| Variable                                                            | Default                        | Notes                                                                                                                                                                                                                                 |
+| Variable | Default | Notes |
 | ------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ------ | ------- | -------------------------------------------------------------------- |
-| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY`                   | required                       | Bearer token. The gateway provider refuses to start without one.                                                                                                                                                                      |
-| `OPENAI_BASE_URL`                                                   | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped.                                                                                                                                                                                                        |
-| `CLAWPATCH_GATEWAY_MODEL`                                           | `protolabs/smart`              | `--model` on the CLI overrides.                                                                                                                                                                                                       |
-| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min)               | Reasoning models on large features can be slow; raise this if you see frequent timeouts.                                                                                                                                              |
-| `CLAWPATCH_GATEWAY_MAX_TOKENS`                                      | unset                          | Sent as `max_tokens` when set to a positive integer (any other value is ignored with a warning). Unset sends none, so the backend's own output budget applies (a fixed cap could push prompt + output past a model's context window). |
+| `GATEWAY_API_KEY` (preferred) or `OPENAI_API_KEY` | required | Bearer token. The gateway provider refuses to start without one. |
+| `OPENAI_BASE_URL` | `https://api.proto-labs.ai/v1` | Trailing slashes are stripped. |
+| `CLAWPATCH_GATEWAY_MODEL` | `protolabs/smart` | `--model` on the CLI overrides. |
+| `CLAWPATCH_GATEWAY_TIMEOUT_MS` (or `CLAWPATCH_PROVIDER_TIMEOUT_MS`) | `300000` (5 min) | Reasoning models on large features can be slow; raise this if you see frequent timeouts. |
+| `CLAWPATCH_GATEWAY_MAX_TOKENS` | unset | Sent as `max_tokens` when set to a positive integer (any other value is ignored with a warning). Unset sends none, so the backend's own output budget applies (a fixed cap could push prompt + output past a model's context window). |
 | `--reasoning-effort none                                            | minimal                        | low                                                                                                                                                                                                                                   | medium | high | xhigh` | (unset) | Forwarded as `reasoning_effort` body field for models that honor it. |
 
 ### Failure handling

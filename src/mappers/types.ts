@@ -37,10 +37,15 @@ export const suppressedTestCommandTag = "validation:test-suppressed";
 
 export type FeatureMapper = {
   name: string;
+  usesNodeContext?: boolean;
   map(root: string, context: MapperContext): Promise<FeatureSeed[]>;
 };
 
+export type RootFilePolicy = "go-fallback" | "c-cpp" | "dotnet";
+export type RootFileInventory = Map<RootFilePolicy, string[]>;
+
 export type MapperContext = {
-  projects: NodeProjectInfo[];
-  taskGraph: WorkspaceTaskGraph;
+  nodeProjects(): Promise<NodeProjectInfo[]>;
+  nodeTaskGraph(): Promise<WorkspaceTaskGraph>;
+  rootFiles(policy: RootFilePolicy): Promise<string[]>;
 };

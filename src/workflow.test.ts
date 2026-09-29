@@ -1,3 +1,4 @@
+import { providerByName } from "./provider.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   access,
@@ -11,7 +12,10 @@ import {
   symlink,
   unlink,
 } from "node:fs/promises";
+import { hostname as osHostname } from "node:os";
 import { delimiter, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import lockfile from "proper-lockfile";
 import {
   fixCommand,
   cleanLocksCommand,
@@ -50,7 +54,7 @@ import {
   writePatchAttempt,
 } from "./state.js";
 import { buildFixPrompt, buildReviewPrompt } from "./prompt.js";
-import type { Provider } from "./provider.js";
+import type { Provider } from "./provider-types.js";
 import { fixtureRoot, testOptions, writeFixture } from "./test-helpers.js";
 import { findingRecordSchema } from "./types.js";
 import type { FeatureRecord, PatchAttempt } from "./types.js";
@@ -259,6 +263,9 @@ describe("workflow", () => {
     expect(() => parseArgs(["--dry-run", "clean-locks"])).toThrow(
       "unsupported flag for clean-locks: --dry-run",
     );
+    expect(parseArgs(["clean-locks", "--stale-only"]).flags).toMatchObject({
+      staleOnly: true,
+    });
     expect(parseArgs(["map", "--dry-run"]).flags).toMatchObject({
       dryRun: true,
     });
@@ -671,6 +678,167 @@ describe("workflow", () => {
     },
   );
 
+  it.runIf(process.platform !== "win32")(
+    "passes trusted Codex config through the spawned provider process",
+    async () => {
+      const root = await fixtureRoot("clawpatch-codex-config-e2e-");
+      await writeFixture(
+        root,
+        "package.json",
+        JSON.stringify({
+          name: "codex-config",
+          bin: { app: "src/index.ts" },
+        }),
+      );
+      await writeFixture(root, "src/index.ts", "export const value = 'ok';\n");
+      const trustedConfigPath = join(root, "trusted-config.json");
+      await writeFixture(
+        root,
+        "trusted-config.json",
+        JSON.stringify({
+          ...defaultConfig(),
+          provider: {
+            ...defaultConfig().provider,
+            codexConfig: {
+              model_provider: "local",
+              "model_providers.local.base_url": "https://example.invalid/v1",
+              "model_providers.local.env_key": "CLAWPATCH_TEST_API_KEY",
+            },
+          },
+        }),
+      );
+      const binDir = join(root, "bin");
+      const codexShim = join(binDir, "codex");
+      const capturedArgsPath = join(root, "codex-args.json");
+      await writeFixture(
+        root,
+        "bin/codex",
+        [
+          "#!/usr/bin/env node",
+          'const { writeFileSync } = require("node:fs");',
+          "const args = process.argv.slice(2);",
+          'if (args.includes("--version")) { console.log("codex fake 0.130.0"); process.exit(0); }',
+          `writeFileSync(${JSON.stringify(capturedArgsPath)}, JSON.stringify(args), "utf8");`,
+          'const outputIndex = args.indexOf("--output-last-message");',
+          "if (outputIndex === -1 || outputIndex + 1 >= args.length) {",
+          '  console.error("missing --output-last-message");',
+          "  process.exit(2);",
+          "}",
+          "const payload = {",
+          "  findings: [],",
+          '  inspected: { files: ["src/index.ts"], symbols: [], notes: ["trusted codex config"] },',
+          "};",
+          'writeFileSync(args[outputIndex + 1], JSON.stringify(payload), "utf8");',
+          "",
+        ].join("\n"),
+      );
+      await chmod(codexShim, 0o755);
+      const previousPath = process.env["PATH"];
+      process.env["PATH"] = `${binDir}${delimiter}${previousPath ?? ""}`;
+      try {
+        const context = await makeContext({ ...testOptions(root), config: trustedConfigPath });
+
+        await initCommand(context, {});
+        const persistedConfig = JSON.parse(
+          await readFile(join(root, ".clawpatch", "config.json"), "utf8"),
+        ) as { provider?: { codexConfig?: unknown } };
+        expect(persistedConfig.provider?.codexConfig).toEqual({});
+        expect((await loadConfig(root, testOptions(root))).provider.codexConfig).toEqual({});
+        await mapCommand(context);
+        await reviewCommand(context, { limit: "1" });
+        const capturedArgs = JSON.parse(await readFile(capturedArgsPath, "utf8")) as string[];
+        const codexConfigArgs: string[] = [];
+        for (let index = 0; index < capturedArgs.length; index += 1) {
+          if (capturedArgs[index] === "-c") {
+            const value = capturedArgs[index + 1];
+            if (value !== undefined) {
+              codexConfigArgs.push(value);
+            }
+          }
+        }
+
+        expect(codexConfigArgs).toEqual([
+          'model_provider="local"',
+          'model_providers.local.base_url="https://example.invalid/v1"',
+          'model_providers.local.env_key="CLAWPATCH_TEST_API_KEY"',
+        ]);
+      } finally {
+        if (previousPath === undefined) {
+          delete process.env["PATH"];
+        } else {
+          process.env["PATH"] = previousPath;
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "times out wedged codex exec review children",
+    async () => {
+      const root = await fixtureRoot("clawpatch-codex-timeout-e2e-");
+      await writeFixture(
+        root,
+        "package.json",
+        JSON.stringify({
+          name: "codex-timeout",
+          bin: { app: "src/index.ts" },
+        }),
+      );
+      await writeFixture(root, "src/index.ts", "export const value = 'ok';\n");
+      const binDir = join(root, "bin");
+      const codexShim = join(binDir, "codex");
+      await writeFixture(
+        root,
+        "bin/codex",
+        [
+          "#!/usr/bin/env node",
+          "const args = process.argv.slice(2);",
+          'if (args.includes("--version")) { console.log("codex fake 0.130.0"); process.exit(0); }',
+          "process.stdin.resume();",
+          "setInterval(() => {}, 1000);",
+          "",
+        ].join("\n"),
+      );
+      await chmod(codexShim, 0o755);
+      const previousProvider = process.env["CLAWPATCH_PROVIDER"];
+      const previousPath = process.env["PATH"];
+      const previousCodexTimeout = process.env["CLAWPATCH_CODEX_TIMEOUT_MS"];
+      process.env["CLAWPATCH_PROVIDER"] = "codex";
+      process.env["PATH"] = `${binDir}${delimiter}${previousPath ?? ""}`;
+      process.env["CLAWPATCH_CODEX_TIMEOUT_MS"] = "50";
+      try {
+        const context = await makeContext(testOptions(root));
+
+        await initCommand(context, {});
+        await mapCommand(context);
+        await expect(reviewCommand(context, { limit: "1" })).rejects.toThrow(
+          /command timed out after 50ms/u,
+        );
+        const features = await readFeatures(statePaths(join(root, ".clawpatch")));
+
+        expect(features[0]?.status).toBe("error");
+        expect(features[0]?.lock).toBeNull();
+        expect(await readdir(join(root, ".clawpatch/locks"))).toEqual([]);
+      } finally {
+        if (previousProvider === undefined) {
+          delete process.env["CLAWPATCH_PROVIDER"];
+        } else {
+          process.env["CLAWPATCH_PROVIDER"] = previousProvider;
+        }
+        if (previousPath === undefined) {
+          delete process.env["PATH"];
+        } else {
+          process.env["PATH"] = previousPath;
+        }
+        if (previousCodexTimeout === undefined) {
+          delete process.env["CLAWPATCH_CODEX_TIMEOUT_MS"];
+        } else {
+          process.env["CLAWPATCH_CODEX_TIMEOUT_MS"] = previousCodexTimeout;
+        }
+      }
+    },
+  );
+
   it("selects review features whose owned files overlap the diff range", async () => {
     const root = await sinceFixture("clawpatch-since-owned-");
     const context = await makeContext(testOptions(root));
@@ -691,6 +859,80 @@ describe("workflow", () => {
       dryRun: true,
       featureIds: expectedFeatureIds(features, new Set(["src/two.ts"]), true),
     });
+  });
+
+  it("selects existing review features when their owned file is renamed", async () => {
+    const root = await sinceFixture("clawpatch-since-rename-");
+    const context = await makeContext(testOptions(root));
+    await initCommand(context, {});
+    await mapCommand(context);
+    const features = await readFeatures(statePaths(join(root, ".clawpatch")));
+    await checkCommand(root, "git config diff.renames true");
+    await checkCommand(root, "git mv src/two.ts src/renamed.ts");
+    await commitAll(root, "rename two");
+
+    const reviewed = await reviewCommand(context, { since: "base", dryRun: true });
+    const expected = expectedFeatureIds(features, new Set(["src/two.ts"]), true);
+    expect(expected.length).toBeGreaterThan(0);
+    expect(reviewed).toMatchObject({ dryRun: true, featureIds: expected });
+  });
+
+  it("selects changed features regardless of their previous review status", async () => {
+    const root = await sinceFixture("clawpatch-since-status-");
+    const context = await makeContext(testOptions(root));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    await writeFixture(root, "src/two.ts", "export const two = 'changed';\n");
+    await commitAll(root, "change two");
+    const paths = statePaths(join(root, ".clawpatch"));
+    const features = await readFeatures(paths);
+    const expected = expectedFeatureIds(features, new Set(["src/two.ts"]), true);
+    const statuses: FeatureRecord["status"][] = ["reviewed", "needs-fix", "fixed"];
+    let statusIndex = 0;
+    for (const feature of features) {
+      if (!expected.includes(feature.featureId)) {
+        continue;
+      }
+      await writeFeature(paths, {
+        ...feature,
+        status: statuses[statusIndex % statuses.length]!,
+      });
+      statusIndex += 1;
+    }
+
+    const reviewed = await reviewCommand(context, { since: "base", dryRun: true });
+
+    expect(expected.length).toBeGreaterThan(0);
+    expect(reviewed).toMatchObject({ dryRun: true, featureIds: expected });
+  });
+
+  it("reviews changed non-pending features through the warm-state CI workflow", async () => {
+    const root = await sinceFixture("clawpatch-ci-since-status-");
+    const context = await makeContext(testOptions(root));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const paths = statePaths(join(root, ".clawpatch"));
+    const features = await readFeatures(paths);
+    const touched = expectedFeatureIds(features, new Set(["src/two.ts"]), true);
+    for (const feature of features) {
+      if (!touched.includes(feature.featureId)) {
+        continue;
+      }
+      await writeFeature(paths, { ...feature, status: "needs-fix" });
+    }
+    await writeFixture(root, "src/two.ts", "export const two = 'changed';\n");
+    await commitAll(root, "change two");
+
+    const result = await ciCommand(context, {
+      provider: "mock",
+      since: "base",
+      jobs: "1",
+    });
+
+    expect(touched.length).toBeGreaterThan(0);
+    expect(result).toMatchObject({ reviewed: touched.length });
   });
 
   it("selects review features whose context files overlap the diff range", async () => {
@@ -1121,6 +1363,76 @@ describe("workflow", () => {
     }
   });
 
+  it("uses linked C# patch evidence when revalidating a fixed finding", async () => {
+    const root = await fixtureRoot("clawpatch-csharp-revalidate-");
+    await writeFixture(
+      root,
+      "Sample.csproj",
+      '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>\n',
+    );
+    await writeFixture(
+      root,
+      "Program.cs",
+      "var completedBatches = 0;\nConsole.WriteLine(42 / completedBatches); // TODO_BUG\n",
+    );
+    process.env["CLAWPATCH_PROVIDER"] = "mock";
+    const context = await makeContext(testOptions(root));
+
+    try {
+      await initCommand(context, {});
+      await mapCommand(context);
+      await reviewCommand(context, { limit: "20" });
+      const paths = statePaths(join(root, ".clawpatch"));
+      const finding = (await readFindings(paths)).find((candidate) =>
+        candidate.evidence.some((evidence) => evidence.path === "Program.cs"),
+      );
+      expect(finding).toBeDefined();
+
+      await writeFixture(
+        root,
+        "Program.cs",
+        "var completedBatches = 0;\nConsole.WriteLine(completedBatches == 0 ? 0 : 42 / completedBatches); // REVALIDATE_PATCH_EVIDENCE\n",
+      );
+      const timestamp = new Date().toISOString();
+      const patch: PatchAttempt = {
+        schemaVersion: 1,
+        patchAttemptId: "pat_csharp_fixed",
+        findingIds: [finding!.findingId],
+        featureIds: [finding!.featureId],
+        status: "validated",
+        plan: "SECRET_OUTPUT_MUST_NOT_REACH_REVALIDATION",
+        filesChanged: ["Program.cs"],
+        commandsRun: [],
+        testResults: [
+          {
+            command: "dotnet build Sample.csproj",
+            cwd: root,
+            exitCode: 0,
+            durationMs: 10,
+            stdout: "SECRET_OUTPUT_MUST_NOT_REACH_REVALIDATION",
+            stderr: "PRIVATE_ERROR_MUST_NOT_REACH_REVALIDATION",
+          },
+        ],
+        provider: null,
+        git: { baseSha: null, commitSha: null, branchName: null, prUrl: null },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      await writePatchAttempt(paths, patch);
+      await writeFinding(paths, {
+        ...finding!,
+        linkedPatchAttemptIds: [patch.patchAttemptId],
+      });
+
+      const result = await revalidateCommand(context, { finding: finding!.findingId });
+
+      expect(result).toMatchObject({ finding: finding!.findingId, outcome: "fixed" });
+      expect((await readFinding(paths, finding!.findingId))?.status).toBe("fixed");
+    } finally {
+      delete process.env["CLAWPATCH_PROVIDER"];
+    }
+  });
+
   it("shows, prioritizes, and triages findings with history", async () => {
     const root = await fixtureRoot("clawpatch-finding-lifecycle-");
     await writeFixture(
@@ -1396,6 +1708,239 @@ describe("workflow", () => {
     expect(await readdir(paths.locks)).toEqual([]);
 
     writeFileSpy.mockRestore();
+  });
+
+  it("reclaims dead local feature locks before claiming", async () => {
+    const root = await fixtureRoot("clawpatch-dead-local-lock-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "dead-local-lock", bin: { stale: "src/index.ts" } }),
+    );
+    await writeFixture(root, "src/index.ts", "export const value = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    const staleLock = {
+      lockedByRunId: "interrupted",
+      lockedAt: new Date().toISOString(),
+      hostname: "local-host",
+      pid: 100,
+    };
+    const nextLock = {
+      lockedByRunId: "run-next",
+      lockedAt: new Date().toISOString(),
+      hostname: "local-host",
+      pid: 101,
+    };
+    await writeFeature(paths, {
+      ...feature!,
+      status: "claimed",
+      lock: staleLock,
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFixture(
+      root,
+      `.clawpatch/locks/${feature!.featureId}.json`,
+      `${JSON.stringify(staleLock, null, 2)}\n`,
+    );
+
+    const claimed = await claimFeature(paths, feature!.featureId, nextLock, {
+      staleLock: { hostname: "local-host", isPidAlive: () => false },
+    });
+
+    expect(claimed.status).toBe("claimed");
+    expect(claimed.lock).toMatchObject({ lockedByRunId: "run-next" });
+    expect(await readdir(paths.locks)).toEqual([`${feature!.featureId}.json`]);
+  });
+
+  it("serializes stale reclamation with a replacement live lock", async () => {
+    const root = await fixtureRoot("clawpatch-stale-lock-replacement-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "stale-lock-replacement", bin: { stale: "src/index.ts" } }),
+    );
+    await writeFixture(root, "src/index.ts", "export const value = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    const staleLock = {
+      lockedByRunId: "interrupted",
+      lockedAt: new Date().toISOString(),
+      hostname: "local-host",
+      pid: 100,
+    };
+    const replacementLock = {
+      lockedByRunId: "replacement",
+      lockedAt: new Date().toISOString(),
+      hostname: "local-host",
+      pid: 101,
+    };
+    await writeFeature(paths, {
+      ...feature!,
+      status: "claimed",
+      lock: staleLock,
+      updatedAt: new Date().toISOString(),
+    });
+    const lockPath = join(paths.locks, `${feature!.featureId}.json`);
+    await writeFixture(
+      root,
+      `.clawpatch/locks/${feature!.featureId}.json`,
+      `${JSON.stringify(staleLock)}\n`,
+    );
+    const releaseMutationLock = await lockfile.lock(lockPath, {
+      realpath: false,
+      stale: 5_000,
+      update: 1_000,
+    });
+    let claimSettled = false;
+    const pendingClaim = claimFeature(
+      paths,
+      feature!.featureId,
+      {
+        lockedByRunId: "delayed-reclaimer",
+        lockedAt: new Date().toISOString(),
+        hostname: "local-host",
+        pid: 102,
+      },
+      {
+        staleLock: {
+          hostname: "local-host",
+          isPidAlive: (pid) => pid === replacementLock.pid,
+        },
+      },
+    );
+    void pendingClaim.then(
+      () => {
+        claimSettled = true;
+      },
+      () => {
+        claimSettled = true;
+      },
+    );
+    await delay(25);
+    expect(claimSettled).toBe(false);
+
+    await writeFeature(paths, {
+      ...feature!,
+      status: "claimed",
+      lock: replacementLock,
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFixture(
+      root,
+      `.clawpatch/locks/${feature!.featureId}.json`,
+      `${JSON.stringify(replacementLock)}\n`,
+    );
+    await releaseMutationLock();
+
+    await expect(pendingClaim).rejects.toMatchObject({ code: "lock-conflict" });
+    expect(
+      (await readFeatures(paths)).find((item) => item.featureId === feature!.featureId)?.lock,
+    ).toMatchObject({
+      lockedByRunId: "replacement",
+    });
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toMatchObject({
+      lockedByRunId: "replacement",
+    });
+  });
+
+  it("keeps live local and remote feature locks claimed", async () => {
+    const root = await fixtureRoot("clawpatch-live-remote-locks-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({
+        name: "live-remote-locks",
+        bin: { live: "src/live.ts", remote: "src/remote.ts" },
+      }),
+    );
+    await writeFixture(root, "src/live.ts", "export const live = 1;\n");
+    await writeFixture(root, "src/remote.ts", "export const remote = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const features = (await readFeatures(paths)).filter((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(features).toHaveLength(2);
+    const liveLock = {
+      lockedByRunId: "live-run",
+      lockedAt: new Date().toISOString(),
+      hostname: "local-host",
+      pid: 100,
+    };
+    const remoteLock = {
+      lockedByRunId: "remote-run",
+      lockedAt: new Date().toISOString(),
+      hostname: "remote-host",
+      pid: 100,
+    };
+    for (const [feature, lock] of [
+      [features[0]!, liveLock],
+      [features[1]!, remoteLock],
+    ] as const) {
+      await writeFeature(paths, {
+        ...feature,
+        status: "claimed",
+        lock,
+        updatedAt: new Date().toISOString(),
+      });
+      await writeFixture(
+        root,
+        `.clawpatch/locks/${feature.featureId}.json`,
+        `${JSON.stringify(lock, null, 2)}\n`,
+      );
+    }
+
+    await expect(
+      claimFeature(
+        paths,
+        features[0]!.featureId,
+        {
+          lockedByRunId: "next-live",
+          lockedAt: new Date().toISOString(),
+          hostname: "local-host",
+          pid: 101,
+        },
+        {
+          staleLock: { hostname: "local-host", isPidAlive: () => true },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "lock-conflict" });
+    await expect(
+      claimFeature(
+        paths,
+        features[1]!.featureId,
+        {
+          lockedByRunId: "next-remote",
+          lockedAt: new Date().toISOString(),
+          hostname: "local-host",
+          pid: 101,
+        },
+        {
+          staleLock: { hostname: "local-host", isPidAlive: () => false },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "lock-conflict" });
+    expect(await readdir(paths.locks)).toEqual(
+      features.map((feature) => `${feature.featureId}.json`).toSorted(),
+    );
   });
 
   it("does not claim a stale feature after another run finishes it", async () => {
@@ -1987,6 +2532,28 @@ describe("workflow", () => {
     }
   });
 
+  it("rejects untrusted Codex passthrough config in doctor", async () => {
+    const root = await fixtureRoot("clawpatch-doctor-untrusted-codex-config-");
+    await writeFixture(
+      root,
+      "clawpatch.config.json",
+      JSON.stringify({
+        ...defaultConfig(),
+        provider: {
+          ...defaultConfig().provider,
+          codexConfig: {
+            model_provider: "local",
+          },
+        },
+      }),
+    );
+    const context = await makeContext(testOptions(root));
+
+    await expect(doctorCommand(context, { provider: "mock" })).rejects.toThrow(
+      /provider\.codexConfig may only be set/u,
+    );
+  });
+
   it("allows fix dry-run when only the default state dir is dirty", async () => {
     const root = await fixtureRoot("clawpatch-state-dirty-");
     await runCommand(
@@ -2171,6 +2738,93 @@ describe("workflow", () => {
     expect(cleaned?.status).toBe("pending");
     expect(cleaned?.lock).toBeNull();
     expect(await readdir(paths.locks)).toEqual([]);
+  });
+
+  it("clean-locks --stale-only clears only dead local locks", async () => {
+    const root = await fixtureRoot("clawpatch-clean-stale-locks-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({
+        name: "clean-stale-locks",
+        bin: {
+          stale: "src/stale.ts",
+          live: "src/live.ts",
+          remote: "src/remote.ts",
+        },
+      }),
+    );
+    await writeFixture(root, "src/stale.ts", "export const stale = 1;\n");
+    await writeFixture(root, "src/live.ts", "export const live = 1;\n");
+    await writeFixture(root, "src/remote.ts", "export const remote = 1;\n");
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const features = (await readFeatures(paths)).filter((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(features).toHaveLength(3);
+    const locks = [
+      {
+        lockedByRunId: "stale-run",
+        lockedAt: new Date().toISOString(),
+        hostname: osHostname(),
+        pid: 0,
+      },
+      {
+        lockedByRunId: "live-run",
+        lockedAt: new Date().toISOString(),
+        hostname: osHostname(),
+        pid: process.pid,
+      },
+      {
+        lockedByRunId: "remote-run",
+        lockedAt: new Date().toISOString(),
+        hostname: "remote-host",
+        pid: 0,
+      },
+    ];
+    for (const [index, feature] of features.entries()) {
+      const lock = locks[index]!;
+      await writeFeature(paths, {
+        ...feature,
+        status: "claimed",
+        lock,
+        updatedAt: new Date().toISOString(),
+      });
+      await writeFixture(
+        root,
+        `.clawpatch/locks/${feature.featureId}.json`,
+        `${JSON.stringify(lock, null, 2)}\n`,
+      );
+    }
+
+    const result = await cleanLocksCommand(context, { staleOnly: true });
+    const cleaned = await readFeatures(paths);
+
+    expect(result).toMatchObject({ cleared: 1, lockFilesCleared: 1 });
+    expect(cleaned.find((feature) => feature.featureId === features[0]!.featureId)).toMatchObject({
+      status: "pending",
+      lock: null,
+    });
+    expect(
+      cleaned.find((feature) => feature.featureId === features[1]!.featureId)?.lock,
+    ).toMatchObject({
+      lockedByRunId: "live-run",
+    });
+    expect(
+      cleaned.find((feature) => feature.featureId === features[2]!.featureId)?.lock,
+    ).toMatchObject({
+      lockedByRunId: "remote-run",
+    });
+    expect(await readdir(paths.locks)).toEqual(
+      features
+        .slice(1)
+        .map((feature) => `${feature.featureId}.json`)
+        .toSorted(),
+    );
   });
 
   it("surfaces crash-window lock files in status", async () => {
@@ -3120,6 +3774,27 @@ describe("workflow", () => {
     });
   });
 
+  it("parses --feature-list as a review value flag", () => {
+    expect(parseArgs(["review", "--feature-list", "/tmp/features.txt"]).flags).toMatchObject({
+      featureList: "/tmp/features.txt",
+    });
+  });
+
+  it("rejects incompatible review flags when --feature-list is set", () => {
+    expect(() =>
+      parseArgs(["review", "--feature-list", "/tmp/features.txt", "--feature", "feat_a"]),
+    ).toThrow("--feature-list cannot be combined with --feature");
+    expect(() =>
+      parseArgs(["review", "--feature-list", "/tmp/features.txt", "--project", "apps/web"]),
+    ).toThrow("--feature-list cannot be combined with --project");
+    expect(() =>
+      parseArgs(["review", "--feature-list", "/tmp/features.txt", "--since", "origin/main"]),
+    ).toThrow("--feature-list cannot be combined with --since");
+    expect(() =>
+      parseArgs(["review", "--feature-list", "/tmp/features.txt", "--include-dirty"]),
+    ).toThrow("--feature-list cannot be combined with --include-dirty");
+  });
+
   it("runs review --prompt-file through the CLI entrypoint", async () => {
     const root = await fixtureRoot("clawpatch-prompt-file-cli-");
     await writeFixture(root, "package.json", JSON.stringify({ name: "prompt-file-cli" }));
@@ -3137,6 +3812,113 @@ describe("workflow", () => {
         join(root, "missing.md"),
       ]),
     ).rejects.toThrow("failed to read --prompt-file");
+  });
+
+  it("runs review --feature-list through the CLI entrypoint", async () => {
+    const root = await fixtureRoot("clawpatch-feature-list-cli-");
+    await writeFixture(root, "package.json", JSON.stringify({ name: "feature-list-cli" }));
+
+    await runCli(["--root", root, "--json", "--quiet", "init"]);
+
+    await expect(
+      runCli([
+        "--root",
+        root,
+        "--json",
+        "--quiet",
+        "review",
+        "--feature-list",
+        join(root, "missing.txt"),
+      ]),
+    ).rejects.toThrow("failed to read --feature-list");
+  });
+
+  it("uses --feature-list order and de-duplicates repeated ids", async () => {
+    const root = await sinceFixture("clawpatch-feature-list-order-");
+    const context = await makeContext(testOptions(root));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const features = await readFeatures(statePaths(join(root, ".clawpatch")));
+    const selected = features
+      .filter((feature) => feature.title.includes("CLI command"))
+      .toSorted((left, right) => left.title.localeCompare(right.title));
+    expect(selected).toHaveLength(3);
+    const featureListPath = join(root, "feature-list.txt");
+    await writeFixture(
+      root,
+      "feature-list.txt",
+      `${selected[2]!.featureId}\n${selected[0]!.featureId}\n${selected[2]!.featureId}\n`,
+    );
+
+    const reviewed = (await reviewCommand(context, {
+      featureList: featureListPath,
+      dryRun: true,
+    })) as { featureIds: string[]; wouldReview: number };
+
+    expect(reviewed).toMatchObject({
+      dryRun: true,
+      wouldReview: 2,
+      featureIds: [selected[2]!.featureId, selected[0]!.featureId],
+    });
+  });
+
+  it("rejects unknown ids in --feature-list", async () => {
+    const root = await sinceFixture("clawpatch-feature-list-missing-");
+    const context = await makeContext(testOptions(root));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const featureListPath = join(root, "feature-list.txt");
+    await writeFixture(root, "feature-list.txt", "feat_missing\n");
+
+    await expect(
+      reviewCommand(context, {
+        featureList: featureListPath,
+        dryRun: true,
+      }),
+    ).rejects.toThrow("unknown feature ids in --feature-list: feat_missing");
+  });
+
+  it("allows --feature-list to review a skipped feature explicitly", async () => {
+    const root = await fixtureRoot("clawpatch-feature-list-skipped-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({
+        name: "feature-list-skipped",
+        bin: { app: "src/index.ts" },
+      }),
+    );
+    await writeFixture(root, "src/index.ts", "export const value = 'TODO_BUG';\n");
+    process.env["CLAWPATCH_PROVIDER"] = "mock";
+    const context = await makeContext(testOptions(root));
+
+    await initCommand(context, {});
+    await mapCommand(context);
+    const paths = statePaths(join(root, ".clawpatch"));
+    const feature = (await readFeatures(paths)).find((candidate) =>
+      candidate.title.includes("CLI command"),
+    );
+    expect(feature).toBeDefined();
+    await writeFeature(paths, {
+      ...feature!,
+      status: "skipped",
+    });
+    const featureListPath = join(root, "feature-list.txt");
+    await writeFixture(root, "feature-list.txt", `${feature!.featureId}\n`);
+
+    const reviewed = (await reviewCommand(context, {
+      featureList: featureListPath,
+      limit: "1",
+    })) as { reviewed: number; findings: number };
+    const updated = await readFeatures(paths);
+    const reviewedFeature = updated.find((candidate) => candidate.featureId === feature!.featureId);
+
+    expect(reviewed).toMatchObject({ reviewed: 1 });
+    expect(reviewed.findings).toBeGreaterThan(0);
+    expect(reviewedFeature?.status).toBe("needs-fix");
+    delete process.env["CLAWPATCH_PROVIDER"];
   });
 
   it("writes a tribunal-shaped JSONL ledger when --export-tribunal-ledger is set", async () => {
@@ -4429,5 +5211,30 @@ describe("workflow", () => {
     expect(patches[0]?.status).toBe("failed");
     expect(findings[0]?.linkedPatchAttemptIds).toContain(patches[0]?.patchAttemptId);
     delete process.env["CLAWPATCH_PROVIDER"];
+  });
+
+  it("records partial edits when a provider fails after writing source", async () => {
+    const root = await sinceFixture("clawpatch-partial-fix-");
+    const context = await makeContext({ ...testOptions(root), quiet: true });
+    await initCommand(context, {});
+    await mapCommand(context);
+    const reviewed = (await reviewCommand(context, { provider: "mock", limit: "1" })) as {
+      next: string;
+    };
+    const finding = reviewed.next.split(" ").at(-1)!;
+    vi.spyOn(providerByName("mock-fail"), "fix").mockImplementationOnce(async () => {
+      await writeFixture(root, "src/one.ts", "export const one = 42;\n");
+      await writeFixture(root, "src/partial.ts", "export const partial = true;\n");
+      throw new Error("failed after editing");
+    });
+    await expect(fixCommand(context, { finding, provider: "mock-fail" })).rejects.toThrow(
+      "failed after editing",
+    );
+    const patches = await readPatchAttempts(statePaths(join(root, ".clawpatch")));
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toMatchObject({
+      status: "failed",
+      filesChanged: ["src/one.ts", "src/partial.ts"],
+    });
   });
 });

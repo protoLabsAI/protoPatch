@@ -1,6 +1,6 @@
 {
   "name": "@protolabsai/protopatch",
-  "version": "0.6.4",
+  "version": "0.8.1",
   "description": "Automated code review that lands fixes — protoLabs fork of clawpatch with a `gateway` provider for OpenAI-compatible endpoints.",
   "homepage": "https://github.com/protoLabsAI/protoPatch#readme",
   "bugs": {
@@ -18,6 +18,7 @@
   "files": [
     "dist",
     "README.md",
+    "VISION.md",
     "LICENSE",
     "CHANGELOG.md"
   ],
@@ -27,13 +28,14 @@
   },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
-    "prepack": "pnpm -s build",
+    "prepack": "pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint . --config oxlint.json",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "website:smoke": "node scripts/website-smoke.mjs",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "pack:smoke": "node scripts/package-smoke.mjs",
     "check:changed": "pnpm run test",
     "test:changed": "pnpm run test",
@@ -43,18 +45,22 @@
     "crabbox:warmup": "crabbox warmup"
   },
   "dependencies": {
+    "js-tokens": "^10.0.0",
+    "proper-lockfile": "^4.1.2",
     "undici": "^8.11.2",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^25.8.0",
-    "oxfmt": "^0.50.0",
-    "oxlint": "^1.64.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+    "@types/node": "^22.20.4",
+    "@types/proper-lockfile": "^4.1.4",
+    "@vitest/coverage-v8": "^5.0.1",
+    "oxfmt": "^0.70.0",
+    "oxlint": "^1.85.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
   },
   "engines": {
     "node": ">=22.19.0"
   },
-  "packageManager": "pnpm@11.1.2"
+  "packageManager": "pnpm@11.27.1+sha512.a81d4c21b9b09a4b0aebf90ef5e527d4262bdda322d26082978cb549023ac6d9cafc98b19fffaa5c71db438a65f70224edb78d7311187861ff96480d1cdca23c"
 }

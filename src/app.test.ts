@@ -1,12 +1,13 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __testing as appTesting, AppContext } from "./app.js";
+import { appTesting, AppContext } from "./app.js";
+import { defaultConfig } from "./config.js";
 import { ClawpatchError } from "./errors.js";
 import { providerByName } from "./provider.js";
-import type { ReviewOutput } from "./types.js";
+import type { PartitionedReviewOutput, Provider } from "./provider-types.js";
 
-// eslint-disable-next-line no-underscore-dangle
-const { isRetryableReviewError, reviewRetries, runProviderReviewWithRetry } = appTesting;
+const { isRetryableReviewError, reviewFlagSubset, reviewRetries, runProviderReviewWithRetry } =
+  appTesting;
 
 const QUIET_CONTEXT: AppContext = {
   root: "/tmp/test-root",
@@ -22,9 +23,21 @@ const QUIET_CONTEXT: AppContext = {
   },
 };
 
-function emptyReview(): ReviewOutput {
-  return { findings: [], inspected: { files: [], symbols: [], notes: ["ok"] } };
+function emptyReview(): PartitionedReviewOutput {
+  return {
+    findings: [],
+    inspected: { files: [], symbols: [], notes: ["ok"] },
+    droppedFindings: [],
+  };
 }
+
+it("forwards the registry-verifier opt-out into CI review flags", () => {
+  expect(reviewFlagSubset({ noRegistryVerify: true })).toEqual({ noRegistryVerify: true });
+});
+
+it("keeps public registry verification opt-in", () => {
+  expect(defaultConfig().registryVerifier.enabled).toBe(false);
+});
 
 function withEnv(name: string, value: string | undefined, fn: () => void): void {
   const previous = process.env[name];
@@ -119,14 +132,7 @@ describe("reviewRetries", () => {
   });
 });
 
-function fakeProvider(reviewImpl: (...args: unknown[]) => Promise<ReviewOutput>): {
-  name: string;
-  check: () => Promise<string>;
-  map: () => Promise<never>;
-  review: (...args: unknown[]) => Promise<ReviewOutput>;
-  fix: () => Promise<never>;
-  revalidate: () => Promise<never>;
-} {
+function fakeProvider(reviewImpl: Provider["review"]): Provider {
   return {
     name: "fake",
     async check(): Promise<string> {
@@ -155,12 +161,10 @@ describe("runProviderReviewWithRetry", () => {
     const review = vi.fn().mockResolvedValue(emptyReview());
     const provider = fakeProvider(review);
     const result = await runProviderReviewWithRetry({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      provider: provider as any,
+      provider,
       root: "/tmp",
       prompt: "hi",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      options: {} as any,
+      options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
       context: QUIET_CONTEXT,
       featureId: "feat_x",
       index: 0,
@@ -178,12 +182,10 @@ describe("runProviderReviewWithRetry", () => {
       .mockResolvedValueOnce(emptyReview());
     const provider = fakeProvider(review);
     const result = await runProviderReviewWithRetry({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      provider: provider as any,
+      provider,
       root: "/tmp",
       prompt: "hi",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      options: {} as any,
+      options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
       context: QUIET_CONTEXT,
       featureId: "feat_x",
       index: 0,
@@ -202,12 +204,10 @@ describe("runProviderReviewWithRetry", () => {
     const acquire = vi.fn().mockResolvedValue(undefined);
     const provider = fakeProvider(review);
     await runProviderReviewWithRetry({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      provider: provider as any,
+      provider,
       root: "/tmp",
       prompt: "hi",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      options: {} as any,
+      options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
       context: QUIET_CONTEXT,
       featureId: "feat_x",
       index: 0,
@@ -225,12 +225,10 @@ describe("runProviderReviewWithRetry", () => {
     const provider = fakeProvider(review);
     await expect(
       runProviderReviewWithRetry({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        provider: provider as any,
+        provider,
         root: "/tmp",
         prompt: "hi",
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        options: {} as any,
+        options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
         context: QUIET_CONTEXT,
         featureId: "feat_x",
         index: 0,
@@ -247,12 +245,10 @@ describe("runProviderReviewWithRetry", () => {
     const provider = fakeProvider(review);
     await expect(
       runProviderReviewWithRetry({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        provider: provider as any,
+        provider,
         root: "/tmp",
         prompt: "hi",
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        options: {} as any,
+        options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
         context: QUIET_CONTEXT,
         featureId: "feat_x",
         index: 0,
@@ -269,12 +265,10 @@ describe("runProviderReviewWithRetry", () => {
     const provider = fakeProvider(review);
     await expect(
       runProviderReviewWithRetry({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        provider: provider as any,
+        provider,
         root: "/tmp",
         prompt: "hi",
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        options: {} as any,
+        options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
         context: QUIET_CONTEXT,
         featureId: "feat_x",
         index: 0,
@@ -343,12 +337,10 @@ describe("runProviderReviewWithRetry", () => {
     const provider = fakeProvider(review);
     await expect(
       runProviderReviewWithRetry({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        provider: provider as any,
+        provider,
         root: "/tmp",
         prompt: "hi",
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        options: {} as any,
+        options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
         context: QUIET_CONTEXT,
         featureId: "feat_x",
         index: 0,
@@ -430,6 +422,7 @@ describe("runProviderReviewWithRetry with the gateway provider", () => {
     inspected: { files: [], symbols: [], notes: ["ok"] },
   });
 
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- kept beside the tests that call it
   function run() {
     return runProviderReviewWithRetry({
       provider: providerByName("gateway"),

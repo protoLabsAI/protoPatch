@@ -1,10 +1,20 @@
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
-import { ClawpatchConfig, FeatureRecord, FindingRecord, ProjectRecord } from "./types.js";
+import { createHash } from "node:crypto";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import {
+  ClawpatchConfig,
+  FeatureRecord,
+  FindingRecord,
+  PatchAttempt,
+  ProjectRecord,
+} from "./types.js";
+import { validationCommandsForFeature } from "./validation.js";
 
 export type ReviewMode = "default" | "deslopify";
 
 export const REVIEW_PROMPT_FILE_CHAR_LIMIT = 24_000;
+const REVALIDATE_FILE_CONTEXT_CHAR_LIMIT = 120_000;
+const REVALIDATE_METADATA_LIST_LIMIT = 50;
 
 export type ReviewPromptFileRole = "owned" | "context" | "test";
 
@@ -181,6 +191,9 @@ ${customPrompt.trim()}
   const validEvidencePaths = [
     ...new Set(includedFiles.filter((file) => file.readable).map((file) => file.path)),
   ];
+  const languageGuidance = reviewLanguageGuidance(project);
+  const cudaBlock =
+    mode === "default" && featureIncludesCuda(feature) ? `\n${cudaGuidance()}\n` : "";
   const prompt = `You are reviewing one semantic feature for clawpatch.
 
 Return strict JSON only. No markdown fences.
@@ -204,7 +217,15 @@ ${customBlock}Review categories:
 - release/build hazards
 - maintainability risks with concrete impact
 
-${reviewModeInstructions(mode)}
+Shell and workflow review:
+- Treat shell files, YAML run blocks, subprocess strings, and Markdown recipes as process-exec code when included.
+- Flag captured machine-readable shell output where a stdout-producing command is mixed with fallback output on the same stream, such as status="$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo 000)"; this can concatenate values like 404000.
+- Focus this rule on captured or parsed values, not human-facing logging fallbacks like some_command || echo "failed".
+- Recommend separating the primary command capture from fallback assignment, for example if ! status="$(cmd)"; then status="fallback"; fi.
+
+${reviewModeInstructions(mode)}${cudaBlock}
+
+${languageGuidance}
 
 Inspect owned files, context files, and linked tests. Treat included tests as first-class
 evidence of intended behavior. If tests contradict a suspected bug, either skip it or
@@ -277,6 +298,34 @@ function reviewFeatureView(feature: FeatureRecord): object {
   };
 }
 
+function reviewLanguageGuidance(project: ProjectRecord): string {
+  if (!project.detected.languages.includes("python")) {
+    return "";
+  }
+  return `Python compatibility guidance:
+- Treat included target-runtime metadata such as .python-version, pyproject.toml requires-python, setup.cfg/setup.py python_requires, runtime.txt, and .tool-versions as authoritative when assessing syntax compatibility.
+- For Python 3.14 or newer, PEP 758 permits unparenthesized multiple exception types in except/except* clauses when no as target is used; do not report that syntax as invalid for Python 3.14+ projects.`;
+}
+
+function featureIncludesCuda(feature: FeatureRecord): boolean {
+  const paths = [
+    ...feature.entrypoints.map((entrypoint) => entrypoint.path),
+    ...feature.ownedFiles.map((file) => file.path),
+  ];
+  return paths.some((path) => /\.cuh?$/iu.test(path));
+}
+
+function cudaGuidance(): string {
+  return `This feature includes CUDA .cu/.cuh sources. Inspect for these CUDA hazards:
+- Kernel data races; missing, divergent, or conditionally-reached __syncthreads()/__syncwarp() barriers.
+- Unchecked CUDA runtime calls (cudaMalloc, cudaMemcpy, cudaFree, async copies) and missing cudaGetLastError()/cudaDeviceSynchronize() after a kernel launch.
+- Host vs. device pointer confusion: dereferencing device memory on the host, or passing the wrong memory space or copy direction to cudaMemcpy.
+- Out-of-bounds or uncoalesced global-memory access, shared-memory bank conflicts, and blockIdx/threadIdx-derived indices used without bounds checks.
+- Stream and event synchronization errors, including use-after-free across asynchronous copies.
+- Device-memory leaks: allocations not freed on every return path.
+Map findings to the existing categories (concurrency, bug, data-loss, performance). Report only hazards visible in the included code; do not speculate about GPU runtime behavior you cannot see.`;
+}
+
 function uniquePromptRefs<T extends { path: string }>(
   refs: readonly T[],
   limit: number,
@@ -345,18 +394,154 @@ function reviewModeInstructions(mode: ReviewMode): string {
   throw new Error(`Unsupported review mode: ${mode}`);
 }
 
-export async function buildRevalidatePrompt(root: string, findingJson: string): Promise<string> {
+export async function buildRevalidatePrompt(
+  root: string,
+  finding: FindingRecord,
+  feature: FeatureRecord,
+  patchAttempts: PatchAttempt[],
+  config: ClawpatchConfig,
+): Promise<string> {
+  const fileBlocks: string[] = [];
+  const newestPatchAttempts = patchAttempts.toSorted((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+  const promptPatchAttempts = newestPatchAttempts.slice(0, 3);
+  const paths = [
+    ...fixPromptPaths(finding, feature, config),
+    ...promptPatchAttempts.flatMap((patch) => patch.filesChanged.slice(0, 50)),
+  ].filter((path, index, allPaths) => allPaths.indexOf(path) === index);
+  const expectedValidationCommands = validationCommandsForFeature(feature, config.commands);
+  let fileContextChars = 0;
+  for (const [index, path] of paths.entries()) {
+    const block = await rawFileBlock(root, path);
+    if (fileContextChars + block.length > REVALIDATE_FILE_CONTEXT_CHAR_LIMIT) {
+      fileBlocks.push(`[omitted ${paths.length - index} files due to revalidation context budget]`);
+      break;
+    }
+    fileBlocks.push(block);
+    fileContextChars += block.length;
+  }
   return `Revalidate this clawpatch finding against the current repository at ${root}.
 
 Check whether the original evidence paths/lines still exist. If evidence moved or changed,
 decide whether the issue is fixed, stale/false-positive, still open elsewhere, or uncertain.
-Use tests and current code as evidence; do not assume a missing line means fixed.
+Use the linked patch attempts, command results, and current files as evidence. Do not assume a
+missing line means fixed. Do not return fixed when targeted validation failed or the current code
+does not support the repair.
 
 Return strict JSON only:
 {"outcome":"fixed|open|false-positive|uncertain","reasoning":"string","commands":["string"]}
 
 Finding:
-${findingJson}`;
+${JSON.stringify(revalidationFindingEvidence(finding), null, 2)}
+
+Feature:
+${JSON.stringify(revalidationFeatureEvidence(feature, config), null, 2)}
+
+Linked patch attempts:
+${JSON.stringify(
+  {
+    attempts: promptPatchAttempts.map((patch) =>
+      revalidationPatchEvidence(patch, expectedValidationCommands),
+    ),
+    omittedAttempts: Math.max(0, newestPatchAttempts.length - promptPatchAttempts.length),
+  },
+  null,
+  2,
+)}
+
+Relevant current files:
+${fileBlocks.join("\n\n")}`;
+}
+
+function revalidationFindingEvidence(finding: FindingRecord): object {
+  return {
+    ...finding,
+    history: finding.history.slice(-5),
+    omittedHistory: Math.max(0, finding.history.length - 5),
+  };
+}
+
+function revalidationFeatureEvidence(feature: FeatureRecord, config: ClawpatchConfig): object {
+  const ownedLimit = Math.min(config.review.maxOwnedFiles, REVALIDATE_METADATA_LIST_LIMIT);
+  const contextLimit = Math.min(config.review.maxContextFiles, REVALIDATE_METADATA_LIST_LIMIT);
+  const testLimit = Math.min(config.review.maxContextFiles, REVALIDATE_METADATA_LIST_LIMIT);
+  return {
+    schemaVersion: feature.schemaVersion,
+    featureId: feature.featureId,
+    title: feature.title,
+    summary: feature.summary,
+    kind: feature.kind,
+    source: feature.source,
+    confidence: feature.confidence,
+    entrypoints: feature.entrypoints.slice(0, REVALIDATE_METADATA_LIST_LIMIT),
+    omittedEntrypoints: Math.max(0, feature.entrypoints.length - REVALIDATE_METADATA_LIST_LIMIT),
+    ownedFiles: feature.ownedFiles.slice(0, ownedLimit),
+    omittedOwnedFiles: Math.max(0, feature.ownedFiles.length - ownedLimit),
+    contextFiles: feature.contextFiles.slice(0, contextLimit),
+    omittedContextFiles: Math.max(0, feature.contextFiles.length - contextLimit),
+    tests: feature.tests.slice(0, testLimit),
+    omittedTests: Math.max(0, feature.tests.length - testLimit),
+    tags: feature.tags.slice(0, REVALIDATE_METADATA_LIST_LIMIT),
+    omittedTags: Math.max(0, feature.tags.length - REVALIDATE_METADATA_LIST_LIMIT),
+    trustBoundaries: feature.trustBoundaries,
+    status: feature.status,
+    lock: feature.lock,
+    findingIds: feature.findingIds.slice(0, REVALIDATE_METADATA_LIST_LIMIT),
+    omittedFindingIds: Math.max(0, feature.findingIds.length - REVALIDATE_METADATA_LIST_LIMIT),
+    patchAttemptIds: feature.patchAttemptIds.slice(0, REVALIDATE_METADATA_LIST_LIMIT),
+    omittedPatchAttemptIds: Math.max(
+      0,
+      feature.patchAttemptIds.length - REVALIDATE_METADATA_LIST_LIMIT,
+    ),
+    analysisHistory: feature.analysisHistory.slice(-3),
+    omittedAnalysisHistory: Math.max(0, feature.analysisHistory.length - 3),
+    createdAt: feature.createdAt,
+    updatedAt: feature.updatedAt,
+  };
+}
+
+function revalidationPatchEvidence(
+  patch: PatchAttempt,
+  expectedValidationCommands: readonly string[],
+): object {
+  return {
+    patchAttemptId: patch.patchAttemptId,
+    status: patch.status,
+    filesChanged: patch.filesChanged.slice(0, 50),
+    omittedFiles: Math.max(0, patch.filesChanged.length - 50),
+    commandsRun: patch.commandsRun
+      .slice(0, 20)
+      .map((result) => revalidationCommandEvidence(result, expectedValidationCommands)),
+    omittedCommands: Math.max(0, patch.commandsRun.length - 20),
+    testResults: patch.testResults
+      .slice(0, 20)
+      .map((result) => revalidationCommandEvidence(result, expectedValidationCommands)),
+    omittedTestResults: Math.max(0, patch.testResults.length - 20),
+  };
+}
+
+function revalidationCommandEvidence(
+  result: PatchAttempt["testResults"][number],
+  expectedValidationCommands: readonly string[],
+): object {
+  const expectedValidationIndex = expectedValidationCommands.indexOf(result.command);
+  return {
+    command: safeCommandIdentifier(result.command),
+    matchedExpectedValidation: expectedValidationIndex >= 0,
+    expectedValidationIndex: expectedValidationIndex >= 0 ? expectedValidationIndex : null,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+  };
+}
+
+function safeCommandIdentifier(command: string): object {
+  const tokens = command.trim().split(/\s+/u);
+  const executable = tokens.find((token) => token !== "env" && !token.includes("="));
+  return {
+    executable: executable === undefined ? "unknown" : basename(executable).slice(0, 80),
+    fingerprint: createHash("sha256").update(command).digest("hex").slice(0, 12),
+  };
 }
 
 export async function buildFixPrompt(
@@ -369,6 +554,7 @@ export async function buildFixPrompt(
   for (const path of fixPromptPaths(finding, feature, config)) {
     fileBlocks.push(await rawFileBlock(root, path));
   }
+  const cudaBlock = featureIncludesCuda(feature) ? `\n${cudaGuidance()}\n` : "";
   return `You are clawpatch applying one small repair in the current repository.
 
 Fix only the finding below. Keep the patch minimal. Add or update focused tests when feasible.
@@ -382,7 +568,7 @@ After editing, return strict JSON only:
   "steps": ["string"],
   "validationCommands": ["string"]
 }
-
+${cudaBlock}
 Finding:
 ${JSON.stringify(finding, null, 2)}
 

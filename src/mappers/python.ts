@@ -1,10 +1,19 @@
+import {
+  pyprojectHasToolSection,
+  pythonTomlStringValues,
+  readTomlBracketValue,
+  pythonRequirementName,
+} from "../python-metadata.js";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { pathExists } from "../fs.js";
+import { shellQuotePath } from "../shell.js";
 import { partitionFileGroups } from "./grouping.js";
 import {
+  uniqueFileRefs,
   isSafeDirectory,
   isSafeFile,
+  normalize,
   packageKind,
   packageTrustBoundaries,
   pathMatchesPrefix,
@@ -47,6 +56,10 @@ type PyprojectInfo = {
   hasPytest: boolean;
 };
 
+type PythonSeedOptions = {
+  testCommandOverride?: string | null;
+};
+
 const sourceRoots = ["src", "app", "apps", "lib", "scripts", "web"] as const;
 const fastApiRouteTargetPattern = [
   "(?:[A-Za-z_][A-Za-z0-9_]*\\.)*",
@@ -67,6 +80,14 @@ const projectMetadataFiles = [
   "setup.cfg",
   "requirements.txt",
 ] as const;
+const runtimeMetadataFiles = [
+  "pyproject.toml",
+  "setup.py",
+  "setup.cfg",
+  ".python-version",
+  "runtime.txt",
+  ".tool-versions",
+] as const;
 const sourceGroupMaxOwnedFiles = 12;
 const sourceGroupMaxTests = 8;
 const flaskRootEntryFiles = [
@@ -78,12 +99,33 @@ const flaskRootEntryFiles = [
 ] as const;
 
 export async function pythonSeeds(root: string): Promise<FeatureSeed[]> {
+  const uvMembers = await uvWorkspaceMemberDirs(root);
+  const seeds = filterRootSeedsUnderUvMembers(await pythonProjectSeeds(root), uvMembers);
+  for (const member of uvMembers) {
+    const memberSeeds = await pythonProjectSeeds(join(root, member), {
+      testCommandOverride: uvWorkspaceMemberTestCommand(member),
+    });
+    for (const seed of memberSeeds) {
+      seeds.push(await workspaceMemberSeed(root, seed, member));
+    }
+  }
+  return seeds;
+}
+
+function uvWorkspaceMemberTestCommand(member: string): string {
+  return `uv run --directory ${shellQuotePath(member)} pytest`;
+}
+
+async function pythonProjectSeeds(
+  root: string,
+  options: PythonSeedOptions = {},
+): Promise<FeatureSeed[]> {
   if (!(await isPythonProject(root))) {
     return [];
   }
   const metadata = await readPythonProjectMetadata(root);
   const metadataFiles = await pythonMetadataFiles(root);
-  const testCommand = await pythonTestCommand(root, metadata);
+  const testCommand = options.testCommandOverride ?? (await pythonTestCommand(root, metadata));
   const testFiles = await pythonTestFiles(root);
   const seeds: FeatureSeed[] = [];
 
@@ -129,7 +171,10 @@ export async function pythonSeeds(root: string): Promise<FeatureSeed[]> {
         resolved.entryPath === script.metadataPath
           ? [{ path: script.metadataPath, reason: "console script metadata" }]
           : [{ path: resolved.entryPath, reason: "console script source" }],
-      contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+      contextFiles: [
+        ...(await pythonRuntimeContextFiles(root, [resolved.entryPath])),
+        ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
+      ],
       tests,
       tags: ["python", "cli"],
       trustBoundaries: ["user-input", "filesystem", "process-exec"],
@@ -166,7 +211,10 @@ export async function pythonSeeds(root: string): Promise<FeatureSeed[]> {
       route: null,
       command: null,
       ownedFiles: group.files.map((path) => ({ path, reason: `source group ${group.label}` })),
-      contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+      contextFiles: [
+        ...(await pythonRuntimeContextFiles(root, group.files)),
+        ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
+      ],
       tests,
       tags: ["python", "source-group"],
       trustBoundaries: packageTrustBoundaries(group.label),
@@ -175,11 +223,360 @@ export async function pythonSeeds(root: string): Promise<FeatureSeed[]> {
     });
   }
 
-  for (const test of standaloneTestSuites(testFiles, testCommand)) {
+  for (const test of await standaloneTestSuites(root, testFiles, testCommand)) {
     seeds.push(test);
   }
 
   return seeds;
+}
+
+function filterRootSeedsUnderUvMembers(
+  seeds: FeatureSeed[],
+  members: readonly string[],
+): FeatureSeed[] {
+  if (members.length === 0) {
+    return seeds;
+  }
+  const filtered: FeatureSeed[] = [];
+  for (const seed of seeds) {
+    if (!seedTouchesUvMember(seed, members)) {
+      filtered.push(seed);
+      continue;
+    }
+    const pruned = pruneRootSeedUvMemberPaths(seed, members);
+    if (pruned !== null) {
+      filtered.push(pruned);
+    }
+  }
+  return filtered;
+}
+
+function seedTouchesUvMember(seed: FeatureSeed, members: readonly string[]): boolean {
+  return seedRepoPaths(seed).some((path) =>
+    members.some((member) => pathMatchesPrefix(path, member)),
+  );
+}
+
+function pruneRootSeedUvMemberPaths(
+  seed: FeatureSeed,
+  members: readonly string[],
+): FeatureSeed | null {
+  if (
+    (seed.source !== "python-source-group" && seed.source !== "python-test-suite") ||
+    seed.ownedFiles === undefined
+  ) {
+    if (seedOwnedOrEntryTouchesUvMember(seed, members)) {
+      return null;
+    }
+    return pruneSeedUvMemberReferences(seed, members);
+  }
+  const ownedFiles = seed.ownedFiles.filter((file) => !pathTouchesUvMember(file.path, members));
+  if (ownedFiles.length === 0) {
+    return null;
+  }
+  const prunedTestEntryPath =
+    seed.source === "python-test-suite" && pathTouchesUvMember(seed.entryPath, members)
+      ? "."
+      : seed.entryPath;
+  const prunedTestTitle =
+    prunedTestEntryPath === "."
+      ? "Python test suite root"
+      : `Python test suite ${prunedTestEntryPath}`;
+  const pruned: FeatureSeed = {
+    ...seed,
+    title: seed.source === "python-test-suite" ? prunedTestTitle : seed.title,
+    entryPath: prunedTestEntryPath,
+    symbol: seed.source === "python-test-suite" ? prunedTestEntryPath : seed.symbol,
+    ownedFiles,
+    summary:
+      seed.source === "python-source-group"
+        ? ownedFiles.length === 1
+          ? `Python source file ${ownedFiles[0]?.path}.`
+          : `Python source group ${seed.entryPath} with ${ownedFiles.length} files.`
+        : prunedTestEntryPath === "."
+          ? "Python pytest files at repository root."
+          : `Python pytest files in ${prunedTestEntryPath}.`,
+  };
+  if (seed.contextFiles !== undefined) {
+    pruned.contextFiles = seed.contextFiles.filter(
+      (file) => !pathTouchesUvMember(file.path, members),
+    );
+  }
+  if (seed.tests !== undefined) {
+    pruned.tests = seed.tests.filter((test) => !pathTouchesUvMember(test.path, members));
+  }
+  if (seed.testPrefixes !== undefined) {
+    pruned.testPrefixes = seed.testPrefixes.filter(
+      (prefix) => !pathTouchesUvMember(prefix, members),
+    );
+  }
+  return pruned;
+}
+
+function seedOwnedOrEntryTouchesUvMember(seed: FeatureSeed, members: readonly string[]): boolean {
+  return (
+    pathTouchesUvMember(seed.entryPath, members) ||
+    (seed.ownedFiles?.some((file) => pathTouchesUvMember(file.path, members)) ?? false)
+  );
+}
+
+function pruneSeedUvMemberReferences(seed: FeatureSeed, members: readonly string[]): FeatureSeed {
+  const pruned: FeatureSeed = { ...seed };
+  if (seed.contextFiles !== undefined) {
+    pruned.contextFiles = seed.contextFiles.filter(
+      (file) => !pathTouchesUvMember(file.path, members),
+    );
+  }
+  if (seed.tests !== undefined) {
+    pruned.tests = seed.tests.filter((test) => !pathTouchesUvMember(test.path, members));
+  }
+  if (seed.testPrefixes !== undefined) {
+    pruned.testPrefixes = seed.testPrefixes.filter(
+      (prefix) => !pathTouchesUvMember(prefix, members),
+    );
+  }
+  return pruned;
+}
+
+function pathTouchesUvMember(path: string, members: readonly string[]): boolean {
+  return members.some((member) => pathMatchesPrefix(path, member));
+}
+
+function seedRepoPaths(seed: FeatureSeed): string[] {
+  return uniquePaths([
+    seed.entryPath,
+    ...(seed.ownedFiles?.map((file) => file.path) ?? []),
+    ...(seed.contextFiles?.map((file) => file.path) ?? []),
+    ...(seed.tests?.map((test) => test.path) ?? []),
+    ...(seed.testPrefixes ?? []),
+  ]);
+}
+
+async function workspaceMemberSeed(
+  workspaceRoot: string,
+  seed: FeatureSeed,
+  member: string,
+): Promise<FeatureSeed> {
+  const prefixPath = (path: string): string => `${member}/${path}`;
+  const genericSource = seed.source === "python-source-group";
+  const genericTestSuite = seed.source === "python-test-suite";
+  const entryPath = prefixPath(seed.entryPath);
+  const contextFiles =
+    seed.contextFiles === undefined
+      ? undefined
+      : seed.contextFiles.map((file) => ({
+          ...file,
+          path: prefixPath(file.path),
+        }));
+  const workspaceRuntimeContext = await pythonRuntimeContextFiles(
+    workspaceRoot,
+    seed.ownedFiles === undefined
+      ? [entryPath]
+      : seed.ownedFiles.map((file) => prefixPath(file.path)),
+  );
+  return {
+    ...seed,
+    title: genericSource
+      ? `Python source ${entryPath}`
+      : genericTestSuite
+        ? `Python test suite ${entryPath}`
+        : seed.title,
+    summary: workspaceMemberSummary(seed, member),
+    entryPath,
+    symbol:
+      (genericSource || genericTestSuite) && seed.symbol !== null
+        ? prefixPath(seed.symbol)
+        : seed.symbol,
+    tags: uniquePaths([...seed.tags, "workspace", "uv-workspace"]),
+    ...(seed.ownedFiles === undefined
+      ? {}
+      : { ownedFiles: seed.ownedFiles.map((file) => ({ ...file, path: prefixPath(file.path) })) }),
+    contextFiles: uniqueFileRefs([...(contextFiles ?? []), ...workspaceRuntimeContext]),
+    ...(seed.tests === undefined
+      ? {}
+      : { tests: seed.tests.map((test) => ({ ...test, path: prefixPath(test.path) })) }),
+    ...(seed.testPrefixes === undefined ? {} : { testPrefixes: seed.testPrefixes.map(prefixPath) }),
+  };
+}
+
+function workspaceMemberSummary(seed: FeatureSeed, member: string): string {
+  if (seed.source === "python-source-group") {
+    return prefixedPythonSourceSummary(seed, member);
+  }
+  if (seed.source === "python-test-suite") {
+    return `Python pytest files in ${member}/${seed.entryPath}.`;
+  }
+  const memberPaths = uniquePaths([
+    seed.entryPath,
+    ...(seed.ownedFiles?.map((file) => file.path) ?? []),
+    ...(seed.contextFiles?.map((file) => file.path) ?? []),
+    ...(seed.tests?.map((test) => test.path) ?? []),
+  ]).toSorted((left, right) => right.length - left.length);
+  let summary = seed.summary;
+  for (const path of memberPaths) {
+    summary = summary.split(path).join(`${member}/${path}`);
+  }
+  return summary;
+}
+
+function prefixedPythonSourceSummary(seed: FeatureSeed, member: string): string {
+  const ownedFiles = seed.ownedFiles?.map((file) => `${member}/${file.path}`) ?? [];
+  if (ownedFiles.length === 1) {
+    return `Python source file ${ownedFiles[0]}.`;
+  }
+  return `Python source group ${member}/${seed.entryPath} with ${ownedFiles.length} files.`;
+}
+
+async function uvWorkspaceMemberDirs(root: string): Promise<string[]> {
+  if (!(await pathExists(join(root, "pyproject.toml")))) {
+    return [];
+  }
+  const source = await readFile(join(root, "pyproject.toml"), "utf8");
+  const workspace = table(source, "tool.uv.workspace");
+  if (workspace.length === 0) {
+    return [];
+  }
+  const members = workspaceArrayValues(workspace, "members");
+  const excludes = workspaceArrayValues(workspace, "exclude").map(workspaceMemberPath);
+  const dirs = new Set<string>();
+  for (const value of members) {
+    const member = workspaceMemberPath(value);
+    if (!isSafeWorkspacePattern(member)) {
+      continue;
+    }
+    const candidates = hasWorkspaceGlob(member)
+      ? await expandWorkspaceMemberPattern(root, member)
+      : [member];
+    for (const candidate of candidates) {
+      if (
+        candidate.length > 0 &&
+        candidate !== "." &&
+        !workspaceMemberExcluded(candidate, excludes) &&
+        (await isSafeDirectory(root, join(root, candidate))) &&
+        (await isSafeFile(root, join(root, candidate, "pyproject.toml")))
+      ) {
+        dirs.add(candidate);
+      }
+    }
+  }
+  return [...dirs].toSorted();
+}
+
+function workspaceArrayValues(source: string, key: string): string[] {
+  return tomlArrayAssignments(source, [key]).flatMap(arrayValues);
+}
+
+function workspaceMemberPath(path: string): string {
+  return normalize(path).replace(/^\.\//u, "").replace(/\/+$/u, "");
+}
+
+function isSafeWorkspacePattern(path: string): boolean {
+  return isSafeWorkspacePath(path.replace(/[*?]/gu, "x"));
+}
+
+function isSafeWorkspacePath(path: string): boolean {
+  return (
+    path.length > 0 && path !== "." && !path.startsWith("/") && !path.split("/").includes("..")
+  );
+}
+
+function hasWorkspaceGlob(path: string): boolean {
+  return /[*?]/u.test(path);
+}
+
+async function expandWorkspaceMemberPattern(root: string, pattern: string): Promise<string[]> {
+  const members: string[] = [];
+  const parts = pattern.split("/");
+  async function visit(base: string, remaining: string[]): Promise<void> {
+    const [part, ...rest] = remaining;
+    if (part === undefined) {
+      if (
+        base.length > 0 &&
+        base !== "." &&
+        (await isSafeDirectory(root, join(root, base))) &&
+        (await isSafeFile(root, join(root, base, "pyproject.toml")))
+      ) {
+        members.push(base);
+      }
+      return;
+    }
+    if (part === "**") {
+      await visit(base, rest);
+      for (const entry of await safeWorkspaceEntries(root, base)) {
+        const next = base.length === 0 ? entry : `${base}/${entry}`;
+        await visit(next, remaining);
+      }
+      return;
+    }
+    if (!hasWorkspaceGlob(part)) {
+      await visit(base.length === 0 ? part : `${base}/${part}`, rest);
+      return;
+    }
+    const matcher = workspaceGlobSegmentRegExp(part);
+    for (const entry of await safeWorkspaceEntries(root, base)) {
+      if (matcher.test(entry)) {
+        await visit(base.length === 0 ? entry : `${base}/${entry}`, rest);
+      }
+    }
+  }
+  await visit("", parts);
+  return members;
+}
+
+async function safeWorkspaceEntries(root: string, base: string): Promise<string[]> {
+  const dir = join(root, base);
+  if (!(await isSafeDirectory(root, dir))) {
+    return [];
+  }
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => entry.name)
+    .filter((entry) => {
+      const path = base.length === 0 ? entry : `${base}/${entry}`;
+      return !pythonShouldSkip(path);
+    })
+    .toSorted();
+}
+
+function workspaceMemberExcluded(member: string, excludes: string[]): boolean {
+  return excludes.some((exclude) => workspacePatternMatches(exclude, member));
+}
+
+function workspacePatternMatches(pattern: string, member: string): boolean {
+  if (!isSafeWorkspacePattern(pattern)) {
+    return false;
+  }
+  return workspaceGlobMatches(pattern, member);
+}
+
+function workspaceGlobMatches(pattern: string, member: string): boolean {
+  const patternParts = pattern.split("/");
+  const memberParts = member.split("/");
+  function match(patternIndex: number, memberIndex: number): boolean {
+    const part = patternParts[patternIndex];
+    if (part === undefined) {
+      return memberIndex === memberParts.length;
+    }
+    if (part === "**") {
+      return (
+        match(patternIndex + 1, memberIndex) ||
+        (memberIndex < memberParts.length && match(patternIndex, memberIndex + 1))
+      );
+    }
+    const memberPart = memberParts[memberIndex];
+    return (
+      memberPart !== undefined &&
+      workspaceGlobSegmentRegExp(part).test(memberPart) &&
+      match(patternIndex + 1, memberIndex + 1)
+    );
+  }
+  return match(0, 0);
+}
+
+function workspaceGlobSegmentRegExp(segment: string): RegExp {
+  const escaped = segment.replace(/[.+^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/gu, "[^/]*").replace(/\?/gu, "[^/]")}$`, "u");
 }
 
 async function isPythonProject(root: string): Promise<boolean> {
@@ -230,6 +627,87 @@ async function pythonMetadataFiles(root: string): Promise<string[]> {
   return files;
 }
 
+async function pythonRuntimeContextFiles(
+  root: string,
+  featurePaths: readonly string[] = [""],
+): Promise<SeedFileRef[]> {
+  const files: SeedFileRef[] = [];
+  const seen = new Set<string>();
+  for (const featurePath of uniquePaths([...featurePaths])) {
+    for (const ref of await nearestPythonRuntimeContextFiles(root, featurePath)) {
+      if (!seen.has(ref.path)) {
+        seen.add(ref.path);
+        files.push(ref);
+      }
+    }
+  }
+  return files;
+}
+
+async function nearestPythonRuntimeContextFiles(
+  root: string,
+  featurePath: string,
+): Promise<SeedFileRef[]> {
+  const refs: SeedFileRef[] = [];
+  for (const dir of ancestorDirs(dirname(featurePath))) {
+    let foundRuntimeConstraint = false;
+    for (const fileName of runtimeMetadataFiles) {
+      const path = dir.length === 0 ? fileName : `${dir}/${fileName}`;
+      if (await pathExists(join(root, path))) {
+        refs.push({ path, reason: "python target runtime metadata" });
+        foundRuntimeConstraint ||= await pythonRuntimeFileDeclaresVersion(root, path);
+      }
+    }
+    if (foundRuntimeConstraint) {
+      return refs;
+    }
+  }
+  return refs;
+}
+
+async function pythonRuntimeFileDeclaresVersion(root: string, path: string): Promise<boolean> {
+  const name = basename(path);
+  if (name === ".python-version" || name === "runtime.txt") {
+    return true;
+  }
+  if (name === ".tool-versions") {
+    const source = await readFile(join(root, path), "utf8").catch(() => "");
+    return /^\s*(?:python|python3)\s+\S+/mu.test(source);
+  }
+  if (name === "pyproject.toml") {
+    const source = await readFile(join(root, path), "utf8").catch(() => "");
+    return (
+      /^\s*requires-python\s*=/mu.test(source) ||
+      tomlStringValue(table(source, "tool.poetry.dependencies"), "python") !== null
+    );
+  }
+  if (name === "setup.cfg") {
+    const source = await readFile(join(root, path), "utf8").catch(() => "");
+    return /^\s*python_requires\s*=/mu.test(source);
+  }
+  if (name === "setup.py") {
+    const source = await readFile(join(root, path), "utf8").catch(() => "");
+    return /\bpython_requires\s*=/u.test(source);
+  }
+  return false;
+}
+
+function ancestorDirs(start: string): string[] {
+  const dirs: string[] = [];
+  let current = normalizeRelativeDir(start);
+  for (;;) {
+    dirs.push(current);
+    if (current.length === 0) {
+      return dirs;
+    }
+    current = normalizeRelativeDir(dirname(current));
+  }
+}
+
+function normalizeRelativeDir(path: string): string {
+  return path === "." ? "" : path.replace(/\/+$/u, "");
+}
+
 async function pythonTestCommand(root: string, pyproject: PyprojectInfo): Promise<string | null> {
   if (
     !pyproject.hasPytest &&
@@ -257,15 +735,6 @@ async function pythonTestCommand(root: string, pyproject: PyprojectInfo): Promis
     return "hatch run pytest";
   }
   return "pytest";
-}
-
-async function pyprojectHasToolSection(root: string, tool: string): Promise<boolean> {
-  if (!(await pathExists(join(root, "pyproject.toml")))) {
-    return false;
-  }
-  const source = await readFile(join(root, "pyproject.toml"), "utf8");
-  const escaped = tool.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`^\\s*\\[\\[?tool\\.${escaped}(?:\\.|\\])`, "mu").test(source);
 }
 
 async function dependencyFileHas(root: string, dependency: string): Promise<boolean> {
@@ -430,7 +899,10 @@ async function djangoRouteSeeds(
           route: expanded.routePath,
           command: null,
           ownedFiles: [{ path: expanded.filePath, reason: "Django URL route declaration" }],
-          contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+          contextFiles: [
+            ...(await pythonRuntimeContextFiles(root, [expanded.filePath])),
+            ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
+          ],
           tests,
           tags: ["python", "django", "route"],
           trustBoundaries: djangoRouteTrustBoundaries(expanded),
@@ -1058,7 +1530,10 @@ async function fastApiRouteSeeds(
         ownedFiles: [
           { path: route.filePath, reason: `FastAPI route handler ${route.functionName}` },
         ],
-        contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+        contextFiles: [
+          ...(await pythonRuntimeContextFiles(root, [route.filePath])),
+          ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
+        ],
         tests,
         tags: ["python", "fastapi", "route"],
         trustBoundaries: fastApiRouteTrustBoundaries(route),
@@ -1276,7 +1751,10 @@ async function flaskRouteSeeds(
         route: `${methodLabel} ${route.routePath}`,
         command: null,
         ownedFiles: [{ path: route.filePath, reason: `Flask route handler ${route.functionName}` }],
-        contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+        contextFiles: [
+          ...(await pythonRuntimeContextFiles(root, [route.filePath])),
+          ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
+        ],
         tests,
         tags: ["python", "flask", "route"],
         trustBoundaries: flaskRouteTrustBoundaries(route),
@@ -1629,32 +2107,40 @@ function fastApiRouteTrustBoundaries(route: FastApiRoute): FeatureSeed["trustBou
   return boundaries;
 }
 
-function standaloneTestSuites(testFiles: string[], command: string | null): FeatureSeed[] {
+async function standaloneTestSuites(
+  root: string,
+  testFiles: string[],
+  command: string | null,
+): Promise<FeatureSeed[]> {
   if (testFiles.length === 0) {
     return [];
   }
   const groups: FileGroup[] = [];
-  for (const [root, files] of groupedTestFiles(testFiles)) {
-    groups.push(...partitionFileGroups(root, files, sourceGroupMaxOwnedFiles));
+  for (const [suiteRoot, files] of groupedTestFiles(testFiles)) {
+    groups.push(...partitionFileGroups(suiteRoot, files, sourceGroupMaxOwnedFiles));
   }
-  return groups.map((group) => ({
-    title: `Python test suite ${group.label}`,
-    summary: `Python pytest files in ${group.label}.`,
-    kind: "test-suite",
-    source: "python-test-suite",
-    confidence: "medium",
-    entryPath: group.label,
-    symbol: group.label,
-    route: null,
-    command: null,
-    ownedFiles: group.files.map((path) => ({ path, reason: "pytest file" })),
-    contextFiles: [],
-    tests: group.files.map((path) => ({ path, command })),
-    tags: ["python", "test"],
-    trustBoundaries: [],
-    testCommand: command,
-    skipNearbyTests: true,
-  }));
+  const seeds: FeatureSeed[] = [];
+  for (const group of groups) {
+    seeds.push({
+      title: `Python test suite ${group.label}`,
+      summary: `Python pytest files in ${group.label}.`,
+      kind: "test-suite",
+      source: "python-test-suite",
+      confidence: "medium",
+      entryPath: group.label,
+      symbol: group.label,
+      route: null,
+      command: null,
+      ownedFiles: group.files.map((path) => ({ path, reason: "pytest file" })),
+      contextFiles: await pythonRuntimeContextFiles(root, group.files),
+      tests: group.files.map((path) => ({ path, command })),
+      tags: ["python", "test"],
+      trustBoundaries: [],
+      testCommand: command,
+      skipNearbyTests: true,
+    });
+  }
+  return seeds;
 }
 
 function groupedTestFiles(testFiles: string[]): Map<string, string[]> {
@@ -1910,7 +2396,7 @@ function dependencyNames(source: string): Set<string> {
   const names = new Set<string>();
   for (const array of tomlArrayAssignments(source, ["dependencies", "dev-dependencies"])) {
     for (const value of arrayValues(array)) {
-      const name = requirementName(value);
+      const name = pythonRequirementName(value);
       if (name !== null) {
         names.add(name);
       }
@@ -1925,7 +2411,7 @@ function dependencyNames(source: string): Set<string> {
     ...tablesMatching(source, /^tool\.poetry\.group\.[^.]+\.dependencies$/u),
   ]) {
     for (const value of assignedKeysAndValues(dependencyTable)) {
-      const name = requirementName(value);
+      const name = pythonRequirementName(value);
       if (name !== null) {
         names.add(name);
       }
@@ -1937,7 +2423,7 @@ function dependencyNames(source: string): Set<string> {
     table(source, "tool.pdm.dev-dependencies"),
   ]) {
     for (const value of assignedValues(dependencyTable)) {
-      const name = requirementName(value);
+      const name = pythonRequirementName(value);
       if (name !== null) {
         names.add(name);
       }
@@ -1951,7 +2437,7 @@ function tomlArrayAssignments(source: string, keys: string[]): string[] {
   for (const key of keys) {
     const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     for (const match of source.matchAll(new RegExp(`^\\s*${escaped}\\s*=\\s*\\[`, "gmu"))) {
-      arrays.push(readBracketValue(source, match.index + match[0].lastIndexOf("[")));
+      arrays.push(readTomlBracketValue(source, match.index + match[0].lastIndexOf("[")));
     }
   }
   return arrays;
@@ -1967,7 +2453,7 @@ function assignedValues(source: string): string[] {
     const lineEnd = source.indexOf("\n", valueStart);
     const rawValue = source.slice(valueStart, lineEnd === -1 ? source.length : lineEnd).trim();
     if (rawValue.startsWith("[")) {
-      values.push(...arrayValues(readBracketValue(source, valueStart)));
+      values.push(...arrayValues(readTomlBracketValue(source, valueStart)));
       continue;
     }
     values.push(...arrayValues(rawValue));
@@ -1987,80 +2473,14 @@ function assignedKeysAndValues(source: string): string[] {
 }
 
 function arrayValues(source: string): string[] {
-  return stringValues(source);
-}
-
-function stringValues(source: string): string[] {
-  const values: string[] = [];
-  let quote: string | null = null;
-  let value = "";
-  let escaped = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote !== null) {
-      if (escaped) {
-        value += char;
-        escaped = false;
-      } else if (char === "\\" && quote === '"') {
-        escaped = true;
-      } else if (char === quote) {
-        values.push(value);
-        quote = null;
-        value = "";
-      } else {
-        value += char;
-      }
-      continue;
-    }
-    if (char === "#") {
-      const nextNewline = source.indexOf("\n", index + 1);
-      if (nextNewline === -1) {
-        break;
-      }
-      index = nextNewline;
-    } else if (char === '"' || char === "'") {
-      quote = char;
-      value = "";
-    }
-  }
-  return values;
-}
-
-function readBracketValue(source: string, bracketIndex: number): string {
-  let depth = 0;
-  let quote: string | null = null;
-  let escaped = false;
-  for (let index = bracketIndex; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote !== null) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === "[") {
-      depth += 1;
-    } else if (char === "]") {
-      depth -= 1;
-      if (depth === 0) {
-        return source.slice(bracketIndex, index + 1);
-      }
-    }
-  }
-  return source.slice(bracketIndex);
+  return pythonTomlStringValues(source);
 }
 
 function requirementNames(source: string): Set<string> {
   return new Set(
     source
       .split("\n")
-      .map((line) => requirementName(line))
+      .map((line) => pythonRequirementName(line))
       .filter((name): name is string => name !== null),
   );
 }
@@ -2104,20 +2524,11 @@ function setupCfgRequirementNames(source: string): Set<string> {
 
 function addRequirementNames(names: Set<string>, value: string): void {
   for (const part of value.split(",")) {
-    const name = requirementName(part);
+    const name = pythonRequirementName(part);
     if (name !== null) {
       names.add(name);
     }
   }
-}
-
-function requirementName(value: string): string | null {
-  const trimmed = value.trim().replace(/^["']|["']$/gu, "");
-  if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.startsWith("-")) {
-    return null;
-  }
-  const match = /^([A-Za-z0-9_.-]+)/u.exec(trimmed);
-  return match?.[1]?.toLowerCase().replace(/_/gu, "-") ?? null;
 }
 
 function uniquePaths(paths: string[]): string[] {

@@ -53,8 +53,11 @@ Supported deterministic mappers today:
   groups including Hilt, Dagger, Koin, and Metro
 - Ruby project metadata, executables, source groups, RSpec/Minitest suites,
   Rails configs, routes, views, assets, and database files
-- Rust Cargo commands, libraries, workspace crates, and integration tests
-- C/C++ standalone `main()` files, CMake targets, and autotools targets
+- Rust Cargo commands, libraries, workspace crates, integration tests, and
+  bounded source groups under each package `src/` (entrypoint `lib.rs` /
+  `main.rs` / bin files stay on command and library features)
+- C/C++/CUDA standalone `main()` files, CMake targets, autotools targets, and
+  bounded loose source groups
 - C#/.NET projects from `.sln`, `.slnx`, `.csproj`, `.fsproj`, and `.vbproj`,
   ASP.NET Core controllers, minimal API endpoints, C#/F#/Visual Basic source
   groups, and .NET test projects
@@ -155,10 +158,15 @@ files are skipped.
 C/C++ mapping covers generic project shapes only: standalone source files with
 `main()`, CMake `add_executable` / `add_library`, and autotools `bin_PROGRAMS` /
 `lib_LTLIBRARIES`. It deliberately avoids project-specific C dialects such as
-php-src extension metadata.
+php-src extension metadata. CUDA `.cu` and `.cuh` files are mapped through the
+same C/C++ shapes, including legacy `FindCUDA` `cuda_add_executable` and
+`cuda_add_library` calls; CUDA targets are tagged `cuda` and carry the
+`concurrency` trust boundary. Source files not owned by any build target are
+grouped per directory into bounded, low-confidence source groups.
 
 Python mapping covers `pyproject.toml`, `setup.cfg`, `setup.py`, and
-`requirements.txt` metadata; `[project.scripts]`, `[tool.poetry.scripts]`,
+`requirements.txt` metadata; uv workspace members declared by
+`[tool.uv.workspace]`; `[project.scripts]`, `[tool.poetry.scripts]`,
 `setup.cfg` `console_scripts`, and `setup.py` console script entry points; root
 app files; source groups under common Python source roots including `web/`;
 pytest files; Flask `@*.route(...)` handlers; FastAPI `@*.get(...)` /
@@ -181,9 +189,61 @@ Known gaps:
 - Express/Fastify/Hono route mapping is conservative and does not infer
   prefixes from cross-file router mounts such as `app.use("/api", router)`,
   `fastify.register(..., { prefix })`, or `app.route("/api", subApp)`
-- Laravel route parsing is convention-based, does not execute Laravel route discovery,
-  and may omit prefixes applied by `Route::group(...)` wrappers
+- Laravel route parsing is convention-based and does not execute Laravel route
+  discovery; literal fluent and array-style group prefixes are supported, while
+  dynamic prefixes remain unresolved
 - C#/.NET mapping does not evaluate MSBuild conditions, imported props/targets,
   or runtime route conventions
-- no import graph expansion beyond nearby tests yet
+- import context is bounded and mapper-specific, rather than a complete dependency graph
 - agent mapping depends on provider quality and validates paths but not semantic intent
+
+## Optional HTTP relations
+
+For a Node/TypeScript frontend and Rust backend that share one HTTP path
+namespace, opt in with explicit, non-overlapping repository-relative roots:
+
+```sh
+clawpatch map --link-http frontend:backend --json
+clawpatch review --link-http frontend:backend --limit 3
+```
+
+The root pair asserts which client and service belong together. Clawpatch does
+not discover deployment origins, proxy rules, or service topology. The output
+contains **candidate** HTTP relations, not proof of runtime connectivity.
+Verify routing before relying on a relation in a finding.
+
+The first version matches unescaped literal `fetch("/path")` (GET) and
+`fetch("/path", { method: "POST" })` calls to Rust `#[get("/path")]`,
+`#[post("/path")]`, `put`, `patch`, `delete`, `head`, or `options` attributes.
+Caller scanning supports `.js`, `.ts`, `.mjs`, `.cjs`, `.mts`, and `.cts`; JSX/TSX
+files are skipped. Matching uses the standard HTTP method and exact literal path. Additional fetch options, computed values,
+template literals, escaped literals, whitespace in paths, query strings, fragments,
+absolute URLs, parameters, wildcard paths,
+Axios, and other handler syntaxes are unsupported. Comments and string contents
+are skipped. JavaScript tokenization follows [js-tokens](https://github.com/lydell/js-tokens)
+lexical coverage; files that exceed tokenizer limits are skipped. Actix-shaped `web::scope(...)` and any Rust `.mount(...)` call disable the pass
+because their prefixes are unresolved, including mounts in helpers whose server
+was constructed elsewhere. External prefixes and macro-generated
+routes remain outside this heuristic; the supplied roots must use the same path
+namespace. Multiple recognized handlers for the same method/path are ambiguous
+and produce no link, even when declared in one file.
+
+Mapping returns an `http` object containing `relations`, `omitted`, and
+`skippedReason`; `--dry-run` returns it too. Each relation identifies the HTTP
+method/path, caller and handler files/lines, and the features owning those files.
+Default mapping output and stored feature slices remain unchanged. Reviews with
+this flag recompute relations from current source, then append up to three
+counterpart files to an ephemeral prompt copy after existing context. Existing
+context-file and per-file prompt limits still apply, including omission reporting.
+Review without the flag never adds HTTP context. Mapping alone does not enable
+it for later reviews, fixes, revalidation, or `ci` runs.
+
+The scan honors configured include/exclude filters and normal mapper directory
+exclusions, skips symlinks, and links only files owned by active features. It
+scans at most 500 source files, 256,000 bytes per file, and 8,000,000 bytes total;
+exceeding a scan budget returns no relations with a reason rather than matching
+against an incomplete inventory. Output is sorted by source path and declaration
+order and limited to 200 relations; `omitted` counts links dropped by that output
+limit. The three-file review context limit is applied independently for each
+feature, so a broad co-owner cannot suppress context for a narrower feature. There is no graph storage
+or feature schema migration.

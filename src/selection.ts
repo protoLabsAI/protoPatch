@@ -2,15 +2,41 @@ import { FeatureRecord, FindingRecord } from "./types.js";
 
 type Flags = Record<string, string | boolean>;
 
-export function selectReviewCandidates(features: FeatureRecord[], flags: Flags): FeatureRecord[] {
+export function selectReviewCandidates(
+  features: FeatureRecord[],
+  flags: Flags,
+  options: { ignoreStatus?: boolean } = {},
+): FeatureRecord[] {
   const featureId = stringFlag(flags, "feature");
   const projectFilter = stringFlag(flags, "project");
   const projectFeatures = filterFeaturesByProject(features, projectFilter);
   const selected =
     featureId === undefined
-      ? projectFeatures.filter((feature) => ["pending", "error"].includes(feature.status))
+      ? options.ignoreStatus === true
+        ? projectFeatures
+        : projectFeatures.filter((feature) => ["pending", "error"].includes(feature.status))
       : projectFeatures.filter((feature) => feature.featureId === featureId);
   return projectFilter === undefined ? selected : selected.toSorted(featureReviewRank);
+}
+
+export function selectFeaturesByIdList(
+  features: FeatureRecord[],
+  featureIds: readonly string[],
+): FeatureRecord[] {
+  const featuresById = new Map(features.map((feature) => [feature.featureId, feature]));
+  const selected: FeatureRecord[] = [];
+  const seen = new Set<string>();
+  for (const featureId of featureIds) {
+    if (seen.has(featureId)) {
+      continue;
+    }
+    seen.add(featureId);
+    const feature = featuresById.get(featureId);
+    if (feature !== undefined) {
+      selected.push(feature);
+    }
+  }
+  return selected;
 }
 
 export function filterFeaturesByChangedFiles(

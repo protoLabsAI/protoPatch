@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { packageScripts } from "../detect.js";
 import { pathExists } from "../fs.js";
-import type { NodeProjectInfo } from "./projects.js";
-import { detectNodePackageManager } from "./shared.js";
+import { shellQuotePath } from "../shell.js";
+import { detectNodePackageManager, type NodeProjectInfo } from "./projects.js";
 import {
   emptyTaskGraph,
   validationTaskNames,
@@ -125,16 +125,18 @@ function stringArray(value: unknown): string[] {
 }
 
 function turboCommand(packageManager: string, task: string, filter: string): string {
+  const quotedTask = shellQuotePath(task);
+  const quotedFilter = shellQuotePath(filter);
   if (packageManager === "pnpm") {
-    return `pnpm turbo run ${task} --filter ${filter}`;
+    return `pnpm turbo run ${quotedTask} --filter ${quotedFilter}`;
   }
   if (packageManager === "yarn") {
-    return `yarn turbo run ${task} --filter ${filter}`;
+    return `yarn turbo run ${quotedTask} --filter ${quotedFilter}`;
   }
   if (packageManager === "bun") {
-    return `bunx turbo run ${task} --filter ${filter}`;
+    return `bunx turbo run ${quotedTask} --filter ${quotedFilter}`;
   }
-  return `npx turbo run ${task} --filter ${filter}`;
+  return `npx turbo run ${quotedTask} --filter ${quotedFilter}`;
 }
 
 function turboPackageName(project: NodeProjectInfo): string | null {

@@ -1,10 +1,17 @@
+import { stripXmlComments } from "../source-comments.js";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { shellQuotePath } from "../shell.js";
 import { TrustBoundary } from "../types.js";
 import { partitionFileGroups } from "./grouping.js";
-import { isSampleProjectPath, normalize, pathMatchesPrefix, shouldSkip, walk } from "./shared.js";
-import { FeatureSeed, SeedFileRef, SeedTestRef } from "./types.js";
+import {
+  uniqueFileRefs,
+  isSampleProjectPath,
+  normalize,
+  pathMatchesPrefix,
+  shouldSkip,
+} from "./shared.js";
+import { FeatureSeed, MapperContext, SeedFileRef, SeedTestRef } from "./types.js";
 
 const maxOwnedFiles = 12;
 const maxTests = 8;
@@ -31,8 +38,8 @@ type DotnetSolution = {
   projectPaths: string[];
 };
 
-export async function dotnetSeeds(root: string): Promise<FeatureSeed[]> {
-  const files = await walk(root, [""], shouldSkipDotnetPath);
+export async function dotnetSeeds(root: string, context: MapperContext): Promise<FeatureSeed[]> {
+  const files = await context.rootFiles("dotnet");
   const fileSet = new Set(files);
   const solutions = await dotnetSolutions(root, files.filter(isDotnetSolutionPath));
   const projectPaths = uniqueStrings([
@@ -948,25 +955,6 @@ function normalizeMsbuildPath(path: string): string {
   return normalize(path.replace(/\\/gu, "/"));
 }
 
-function stripXmlComments(source: string): string {
-  let output = "";
-  let index = 0;
-  while (index < source.length) {
-    const start = source.indexOf("<!--", index);
-    if (start === -1) {
-      output += source.slice(index);
-      break;
-    }
-    output += source.slice(index, start);
-    const end = source.indexOf("-->", start + 4);
-    if (end === -1) {
-      break;
-    }
-    index = end + 3;
-  }
-  return output;
-}
-
 function isStrongTestProject(source: string): boolean {
   return (
     /<IsTestProject>\s*true\s*<\/IsTestProject>/iu.test(source) ||
@@ -1092,7 +1080,7 @@ function dotnetLanguageName(language: DotnetProject["language"]): string {
   return "C#";
 }
 
-function shouldSkipDotnetPath(path: string): boolean {
+export function shouldSkipDotnetPath(path: string): boolean {
   if (shouldSkip(path) || isSampleProjectPath(path)) {
     return true;
   }
@@ -1108,19 +1096,6 @@ function isDotnetGeneratedOrCachePath(path: string): boolean {
 
 function normalizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/gu, "");
-}
-
-function uniqueFileRefs(refs: SeedFileRef[]): SeedFileRef[] {
-  const seen = new Set<string>();
-  const output: SeedFileRef[] = [];
-  for (const ref of refs) {
-    if (seen.has(ref.path)) {
-      continue;
-    }
-    seen.add(ref.path);
-    output.push(ref);
-  }
-  return output;
 }
 
 function uniqueStrings<T extends string>(values: T[]): T[] {

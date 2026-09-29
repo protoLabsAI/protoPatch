@@ -1,8 +1,13 @@
 import { nowIso } from "./fs.js";
 import { stableId } from "./id.js";
-import { cCppSeeds } from "./mappers/c-cpp.js";
+import {
+  dedupeFeatureSeeds,
+  seedIdentityParts,
+  stableFeatureJson,
+} from "./mapper-reconciliation.js";
+import { cCppSeeds, shouldSkipCOrCppPath } from "./mappers/c-cpp.js";
 import { configSeeds } from "./mappers/config.js";
-import { dotnetSeeds } from "./mappers/dotnet.js";
+import { dotnetSeeds, shouldSkipDotnetPath } from "./mappers/dotnet.js";
 import { elixirSeeds } from "./mappers/elixir.js";
 import { goSeeds } from "./mappers/go.js";
 import { appleSeeds } from "./mappers/apple.js";
@@ -14,10 +19,17 @@ import { nodeRouteSeeds } from "./mappers/node-routes.js";
 import { nodeSeeds } from "./mappers/node.js";
 import { pythonSeeds } from "./mappers/python.js";
 import { reactSeeds } from "./mappers/react.js";
-import { discoverNodeProjects } from "./mappers/projects.js";
+import { createMapperContext } from "./mappers/context.js";
+import { discoverNodeProjects, hasFallbackNodeProjectSignal } from "./mappers/projects.js";
 import { rubySeeds } from "./mappers/ruby.js";
 import { rustSeeds } from "./mappers/rust.js";
-import { nearbyTests, PathFilters, pathMatchesFilters } from "./mappers/shared.js";
+import {
+  createNearbyTestFinder,
+  PathFilters,
+  pathMatchesFilters,
+  shouldSkip,
+  walkByPolicy,
+} from "./mappers/shared.js";
 import { swiftSeeds } from "./mappers/swift.js";
 import { turboTaskGraph } from "./mappers/turbo.js";
 import { FeatureMapper, FeatureSeed, MapperContext } from "./mappers/types.js";
@@ -43,10 +55,10 @@ export type MapOptions = {
 };
 
 const featureMappers: FeatureMapper[] = [
-  { name: "node", map: nodeSeeds },
-  { name: "next", map: nextSeeds },
-  { name: "react", map: reactSeeds },
-  { name: "node-routes", map: nodeRouteSeeds },
+  { name: "node", usesNodeContext: true, map: nodeSeeds },
+  { name: "next", usesNodeContext: true, map: nextSeeds },
+  { name: "react", usesNodeContext: true, map: reactSeeds },
+  { name: "node-routes", usesNodeContext: true, map: nodeRouteSeeds },
   { name: "go", map: goSeeds },
   { name: "python", map: pythonSeeds },
   { name: "ruby", map: rubySeeds },
@@ -68,7 +80,7 @@ export async function mapFeatures(
   existing: FeatureRecord[],
   options: MapOptions = {},
 ): Promise<MapResult> {
-  const seeds = await collectSeeds(root, options);
+  const seeds = await collectSeeds(root, project, options);
   return mapFeatureSeeds(root, project, existing, seeds, options);
 }
 
@@ -84,6 +96,7 @@ export async function mapFeatureSeeds(
   let created = 0;
   let changed = 0;
   const now = nowIso();
+  const findNearbyTests = createNearbyTestFinder(root);
   for (const rawSeed of seeds) {
     const seed = filterSeed(rawSeed, options.filters);
     if (seed === null) {
@@ -95,8 +108,7 @@ export async function mapFeatureSeeds(
     const discoveredTests =
       seed.skipNearbyTests === true
         ? []
-        : await nearbyTests(
-            root,
+        : await findNearbyTests(
             seed.entryPath,
             Object.hasOwn(seed, "testCommand")
               ? (seed.testCommand ?? null)
@@ -143,8 +155,7 @@ export async function mapFeatureSeeds(
       updatedAt: now,
     };
     const featureChanged =
-      previous !== undefined &&
-      JSON.stringify(stripVolatile(previous)) !== JSON.stringify(stripVolatile(feature));
+      previous !== undefined && stableFeatureJson(previous) !== stableFeatureJson(feature);
     if (featureChanged) {
       feature.status = statusForChangedFeature(previous.status);
     } else if (previous?.status === "skipped") {
@@ -157,13 +168,12 @@ export async function mapFeatureSeeds(
     }
     features.push(feature);
   }
+  const mappedIds = new Set(features.map((feature) => feature.featureId));
   return {
     features,
     created,
     changed,
-    stale: existing.filter(
-      (feature) => !features.some((mapped) => mapped.featureId === feature.featureId),
-    ).length,
+    stale: existing.filter((feature) => !mappedIds.has(feature.featureId)).length,
   };
 }
 
@@ -220,12 +230,7 @@ function featureIdentity(
 ): { featureId: string; symbol: string | null } {
   const symbol = effectiveSymbol(seed, existingById);
   return {
-    featureId: stableId("feat", [
-      seed.kind,
-      seed.source,
-      seed.entryPath,
-      seed.identityKey ?? seed.command ?? seed.route ?? symbol ?? "",
-    ]),
+    featureId: stableId("feat", seedIdentityParts(seed, symbol)),
     symbol,
   };
 }
@@ -287,17 +292,34 @@ function uniqueTests(tests: Array<{ path: string; command: string | null }>): Ar
   return output;
 }
 
-async function collectSeeds(root: string, options: MapOptions): Promise<FeatureSeed[]> {
-  const projects = await discoverNodeProjects(root);
-  const context: MapperContext = {
-    projects,
-    taskGraph: await turboTaskGraph(root, projects),
-  };
+async function collectSeeds(
+  root: string,
+  project: ProjectRecord,
+  options: MapOptions,
+): Promise<FeatureSeed[]> {
+  const context: MapperContext = createMapperContext({
+    discoverNodeProjects: () => discoverNodeProjects(root),
+    buildNodeTaskGraph: (projects) => turboTaskGraph(root, projects),
+    buildRootFileInventory: () =>
+      walkByPolicy(
+        root,
+        [""],
+        [
+          { key: "go-fallback", skipPath: shouldSkip },
+          { key: "c-cpp", skipPath: shouldSkipCOrCppPath },
+          { key: "dotnet", skipPath: shouldSkipDotnetPath },
+        ],
+      ),
+  });
+  const runNodeMappers = shouldRunNodeMappers(root, project);
   const groups = await Promise.all(
     featureMappers.map(async (mapper) => {
       const started = Date.now();
       options.onProgress?.({ event: "mapper-start", mapper: mapper.name });
-      const seeds = await mapper.map(root, context);
+      const seeds =
+        mapper.usesNodeContext === true && !(await runNodeMappers)
+          ? []
+          : await mapper.map(root, context);
       options.onProgress?.({
         event: "mapper-done",
         mapper: mapper.name,
@@ -307,34 +329,21 @@ async function collectSeeds(root: string, options: MapOptions): Promise<FeatureS
       return seeds;
     }),
   );
-  return dedupeSeeds(groups.flat());
+  return dedupeFeatureSeeds(groups.flat());
 }
 
-function dedupeSeeds(seeds: FeatureSeed[]): FeatureSeed[] {
-  const seen = new Set<string>();
-  const output: FeatureSeed[] = [];
-  for (const seed of seeds) {
-    const key = `${seed.kind}:${seed.source}:${seed.entryPath}:${seed.identityKey ?? seed.command ?? seed.route ?? seed.symbol ?? ""}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    output.push(seed);
+async function shouldRunNodeMappers(root: string, project: ProjectRecord): Promise<boolean> {
+  if (
+    project.detected.languages.some((language) =>
+      ["javascript", "typescript"].includes(language),
+    ) ||
+    project.detected.packageManagers.some((manager) =>
+      ["node", "npm", "pnpm", "yarn", "bun"].includes(manager),
+    )
+  ) {
+    return true;
   }
-  return output;
-}
-
-function stripVolatile(
-  feature: FeatureRecord,
-): Omit<FeatureRecord, "createdAt" | "updatedAt" | "lock" | "analysisHistory"> {
-  const {
-    createdAt: _createdAt,
-    updatedAt: _updatedAt,
-    lock: _lock,
-    analysisHistory: _analysisHistory,
-    ...stable
-  } = feature;
-  return stable;
+  return hasFallbackNodeProjectSignal(root);
 }
 
 function statusForChangedFeature(status: FeatureRecord["status"]): FeatureRecord["status"] {

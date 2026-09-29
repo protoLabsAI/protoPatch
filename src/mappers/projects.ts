@@ -1,7 +1,14 @@
+import {
+  parsePnpmWorkspace,
+  isExcludedWorkspace,
+  hasWorkspaceGlob,
+  globSegmentRegExp,
+} from "./workspace-patterns.js";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { packageScripts, readPackageJson } from "../detect.js";
 import { pathExists } from "../fs.js";
+import { shellQuotePath } from "../shell.js";
 import { isSafeDirectory, normalize, pathMatchesPrefix, shouldSkip } from "./shared.js";
 import { taskGraphCommand, type WorkspaceTaskGraph } from "./task-graph.js";
 import type { SeedFileRef } from "./types.js";
@@ -11,6 +18,8 @@ export type NodePackageJson = {
   scripts?: unknown;
   dependencies?: unknown;
   devDependencies?: unknown;
+  peerDependencies?: unknown;
+  optionalDependencies?: unknown;
   bin?: unknown;
   exports?: unknown;
   main?: unknown;
@@ -123,6 +132,72 @@ export async function discoverNodeProjects(root: string): Promise<NodeProjectInf
   return [...byRoot.values()].toSorted((left, right) => left.root.localeCompare(right.root));
 }
 
+export async function hasFallbackNodeProjectSignal(root: string): Promise<boolean> {
+  if ((await pathExists(join(root, "nx.json"))) || (await hasNestedNxProject(root, "", 5))) {
+    return true;
+  }
+  for (const prefix of ["apps", "packages", "frontend", "client", "web"]) {
+    if (await hasNestedPackageJson(root, prefix, 4)) {
+      return true;
+    }
+  }
+  const candidates = ["frontend", "client", "web", "ui"];
+  for (const parent of ["apps", "packages", "extensions", "plugins"]) {
+    for (const entry of await safeDirectoryEntries(root, parent)) {
+      candidates.push(`${parent}/${entry}`);
+    }
+  }
+  for (const candidate of candidates) {
+    if (
+      (await pathExists(join(root, candidate, "package.json"))) ||
+      (await pathExists(join(root, candidate, "project.json"))) ||
+      (await hasGenericProjectSignal(root, null, candidate))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasNestedNxProject(
+  root: string,
+  prefix: string,
+  remainingDepth: number,
+): Promise<boolean> {
+  if (remainingDepth < 0 || shouldSkipProjectDir(prefix)) {
+    return false;
+  }
+  if (prefix.length > 0 && (await pathExists(join(root, prefix, "project.json")))) {
+    return true;
+  }
+  for (const entry of await safeDirectoryEntries(root, prefix)) {
+    const child = prefix.length === 0 ? entry : `${prefix}/${entry}`;
+    if (await hasNestedNxProject(root, child, remainingDepth - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasNestedPackageJson(
+  root: string,
+  prefix: string,
+  remainingDepth: number,
+): Promise<boolean> {
+  if (remainingDepth < 0 || shouldSkipProjectDir(prefix)) {
+    return false;
+  }
+  if (await pathExists(join(root, prefix, "package.json"))) {
+    return true;
+  }
+  for (const entry of await safeDirectoryEntries(root, prefix)) {
+    if (await hasNestedPackageJson(root, `${prefix}/${entry}`, remainingDepth - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function discoverDeclaredPackageRoots(
   root: string,
   rootPackage: NodePackageJson | null,
@@ -194,22 +269,26 @@ export function packageRelativePath(packageRoot: string, path: string): string {
 }
 
 export function scriptCommand(packageManager: string, packageRoot: string, script: string): string {
+  const quotedScript = shellQuotePath(script);
   if (packageRoot === ".") {
     if (packageManager === "bun") {
-      return `bun run ${script}`;
+      return `bun run ${quotedScript}`;
     }
-    return packageManager === "npm" ? `npm run ${script}` : `${packageManager} ${script}`;
+    return packageManager === "npm"
+      ? `npm run ${quotedScript}`
+      : `${packageManager} ${quotedScript}`;
   }
+  const quotedRoot = shellQuotePath(packageRoot);
   if (packageManager === "pnpm") {
-    return `pnpm --dir ${packageRoot} ${script}`;
+    return `pnpm --dir ${quotedRoot} ${quotedScript}`;
   }
   if (packageManager === "yarn") {
-    return `yarn --cwd ${packageRoot} ${script}`;
+    return `yarn --cwd ${quotedRoot} ${quotedScript}`;
   }
   if (packageManager === "bun") {
-    return `bun --cwd ${packageRoot} run ${script}`;
+    return `bun --cwd ${quotedRoot} run ${quotedScript}`;
   }
-  return `npm --prefix ${packageRoot} run ${script}`;
+  return `npm --prefix ${quotedRoot} run ${quotedScript}`;
 }
 
 export function projectDisplayName(info: NodeProjectInfo): string {
@@ -218,6 +297,15 @@ export function projectDisplayName(info: NodeProjectInfo): string {
 
 export function dependencyFieldHas(field: unknown, name: string): boolean {
   return typeof field === "object" && field !== null && Object.hasOwn(field, name);
+}
+
+export function packageHasDependency(pkg: NodePackageJson | null, name: string): boolean {
+  return (
+    pkg !== null &&
+    [pkg.dependencies, pkg.devDependencies, pkg.peerDependencies, pkg.optionalDependencies].some(
+      (field) => dependencyFieldHas(field, name),
+    )
+  );
 }
 
 async function existingProjectContextFiles(
@@ -432,25 +520,6 @@ function packageWorkspacePatterns(pkg: NodePackageJson): string[] {
   return [];
 }
 
-function parsePnpmWorkspace(source: string): string[] {
-  const patterns: string[] = [];
-  let inPackages = false;
-  for (const rawLine of source.split("\n")) {
-    const line = rawLine.replace(/#.*/u, "");
-    if (/^\S/u.test(line)) {
-      inPackages = /^packages\s*:/u.test(line);
-    }
-    if (!inPackages) {
-      continue;
-    }
-    const match = /^\s*-\s*["']?([^"'\s]+)["']?\s*$/u.exec(line);
-    if (match?.[1] !== undefined) {
-      patterns.push(match[1]);
-    }
-  }
-  return patterns;
-}
-
 async function expandWorkspacePattern(root: string, pattern: string): Promise<string[]> {
   const normalized = normalizeWorkspacePattern(pattern);
   if (normalized === null) {
@@ -494,52 +563,6 @@ function normalizeWorkspacePattern(pattern: string): string | null {
   return normalized;
 }
 
-function isExcludedWorkspace(packageRoot: string, excludes: string[]): boolean {
-  return excludes.some((pattern) => workspacePatternMatches(pattern, packageRoot));
-}
-
-function workspacePatternMatches(pattern: string, packageRoot: string): boolean {
-  if (pattern === packageRoot) {
-    return true;
-  }
-  if (hasWorkspaceGlob(pattern)) {
-    return workspaceGlobMatches(pattern, packageRoot);
-  }
-  if (pattern.endsWith("/**")) {
-    return pathMatchesPrefix(packageRoot, pattern.slice(0, -3));
-  }
-  if (pattern.endsWith("/*")) {
-    const parent = pattern.slice(0, -2);
-    if (!pathMatchesPrefix(packageRoot, parent)) {
-      return false;
-    }
-    return packageRoot.slice(parent.length + 1).split("/").length === 1;
-  }
-  return false;
-}
-
-function workspaceGlobMatches(pattern: string, packageRoot: string): boolean {
-  return globSegmentsMatch(pattern.split("/"), packageRoot.split("/"));
-}
-
-function globSegmentsMatch(pattern: string[], candidate: string[]): boolean {
-  const [segment, ...remainingPattern] = pattern;
-  if (segment === undefined) {
-    return candidate.length === 0;
-  }
-  if (segment === "**") {
-    return (
-      globSegmentsMatch(remainingPattern, candidate) ||
-      (candidate.length > 0 && globSegmentsMatch(pattern, candidate.slice(1)))
-    );
-  }
-  const [candidateSegment, ...remainingCandidate] = candidate;
-  if (candidateSegment === undefined || !globSegmentRegExp(segment).test(candidateSegment)) {
-    return false;
-  }
-  return globSegmentsMatch(remainingPattern, remainingCandidate);
-}
-
 async function expandWorkspaceGlob(root: string, pattern: string): Promise<string[]> {
   const packages: string[] = [];
   const segments = pattern.split("/");
@@ -580,15 +603,6 @@ async function expandWorkspaceGlob(root: string, pattern: string): Promise<strin
 
   await visit("", segments);
   return packages.toSorted();
-}
-
-function hasWorkspaceGlob(pattern: string): boolean {
-  return /[*?]/u.test(pattern);
-}
-
-function globSegmentRegExp(segment: string): RegExp {
-  const escaped = segment.replace(/[.+^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`^${escaped.replace(/\*/gu, "[^/]*").replace(/\?/gu, "[^/]")}$`, "u");
 }
 
 async function discoverPackageRootsUnder(
@@ -978,7 +992,7 @@ function packageDisplayName(
   return packageRoot === "." ? basename(dirname(join(packageJsonPath))) : basename(packageRoot);
 }
 
-async function detectNodePackageManager(root: string): Promise<string> {
+export async function detectNodePackageManager(root: string): Promise<string> {
   if (
     (await pathExists(join(root, "pnpm-lock.yaml"))) ||
     (await pathExists(join(root, "pnpm-workspace.yaml")))
@@ -995,11 +1009,13 @@ async function detectNodePackageManager(root: string): Promise<string> {
 }
 
 function nxCommand(packageManager: string, target: string, projectName: string): string {
+  const quotedTarget = shellQuotePath(target);
+  const quotedProjectName = shellQuotePath(projectName);
   if (packageManager === "npm") {
-    return `npx nx ${target} ${projectName}`;
+    return `npx nx ${quotedTarget} ${quotedProjectName}`;
   }
   if (packageManager === "bun") {
-    return `bunx nx ${target} ${projectName}`;
+    return `bunx nx ${quotedTarget} ${quotedProjectName}`;
   }
-  return `${packageManager} nx ${target} ${projectName}`;
+  return `${packageManager} nx ${quotedTarget} ${quotedProjectName}`;
 }

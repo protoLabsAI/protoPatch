@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEW_PROMPT_FILE_CHAR_LIMIT,
   buildFixPrompt,
+  buildRevalidatePrompt,
   buildReviewPromptBundle,
 } from "./prompt.js";
 import { defaultConfig } from "./config.js";
@@ -106,6 +107,63 @@ describe("review prompt provenance", () => {
     );
   });
 
+  it("compacts revalidation feature metadata before provider submission", async () => {
+    const root = await fixtureRoot("clawpatch-revalidate-prompt-budget-");
+    await writeFixture(root, "src/index.ts", "export const value = 1;\n");
+    const largeFeature: FeatureRecord = {
+      ...feature(),
+      ownedFiles: [{ path: "src/index.ts", reason: "primary" }],
+      contextFiles: Array.from({ length: 2_500 }, (_, index) => ({
+        path: `docs/context-${index}.md`,
+        reason: `context ${"x".repeat(300)}`,
+      })),
+      tests: Array.from({ length: 200 }, (_, index) => ({
+        path: `tests/context-${index}.test.ts`,
+        command: null,
+      })),
+      findingIds: Array.from({ length: 200 }, (_, index) => `fnd_large_${index}`),
+      patchAttemptIds: Array.from({ length: 200 }, (_, index) => `patch_large_${index}`),
+      analysisHistory: Array.from({ length: 40 }, (_, index) => ({
+        runId: `run_large_${index}`,
+        kind: "review",
+        summary: `large analysis ${"x".repeat(1_000)}`,
+        provider: "codex",
+        model: null,
+        reasoningEffort: null,
+        createdAt: new Date(2026, 0, index + 1).toISOString(),
+      })),
+    };
+    const largeFinding: FindingRecord = {
+      ...finding("src/index.ts"),
+      history: Array.from({ length: 40 }, (_, index) => ({
+        runId: `run_history_${index}`,
+        kind: "revalidate",
+        status: "open",
+        note: null,
+        reasoning: `large history ${"x".repeat(1_000)}`,
+        commands: [],
+        createdAt: new Date(2026, 0, index + 1).toISOString(),
+      })),
+    };
+    const config = defaultConfig();
+    config.review.maxOwnedFiles = 10_000;
+    config.review.maxContextFiles = 10_000;
+
+    const prompt = await buildRevalidatePrompt(root, largeFinding, largeFeature, [], config);
+
+    expect(prompt.length).toBeLessThan(1_048_576);
+    expect(prompt).toContain('"omittedContextFiles": 2450');
+    expect(prompt).toContain('"omittedTests": 150');
+    expect(prompt).toContain('"omittedFindingIds": 150');
+    expect(prompt).toContain('"omittedPatchAttemptIds": 150');
+    expect(prompt).toContain('"omittedAnalysisHistory": 37');
+    expect(prompt).toContain('"omittedHistory": 35');
+    expect(prompt).toContain("--- src/index.ts");
+    expect(prompt).not.toContain('"path": "docs/context-2499.md"');
+    expect(prompt).not.toContain("large analysis 0");
+    expect(prompt).not.toContain("large history 0");
+  });
+
   it("does not list duplicate-skipped included files as omitted", async () => {
     const root = await fixtureRoot("clawpatch-prompt-duplicate-context-");
     await writeFixture(root, "src/index.ts", "export const value = 1;\n");
@@ -193,9 +251,208 @@ describe("review prompt provenance", () => {
     expect(prompt).not.toContain("1 | export const value = 1;");
     expect(prompt).not.toContain("--- src/other.ts");
   });
+
+  it("includes Python runtime syntax guidance in review prompts", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-python-runtime-guidance-");
+    await writeFixture(
+      root,
+      "main.py",
+      [
+        "def parse(value):",
+        "    try:",
+        "        return float(value)",
+        "    except TypeError, ValueError:",
+        "        return 0",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(root, ".python-version", "3.14\n");
+    const pythonFeature = {
+      ...feature(),
+      ownedFiles: [{ path: "main.py", reason: "source group root" }],
+      contextFiles: [{ path: ".python-version", reason: "python target runtime metadata" }],
+      tests: [],
+    };
+
+    const bundle = await buildReviewPromptBundle(
+      root,
+      project(root, ["python"]),
+      pythonFeature,
+      defaultConfig(),
+    );
+
+    expect(bundle.prompt).toContain("Python compatibility guidance:");
+    expect(bundle.prompt).toContain(".python-version");
+    expect(bundle.prompt).toContain("PEP 758 permits unparenthesized multiple exception types");
+    expect(bundle.prompt).toContain("--- .python-version (context, lines 1-1)");
+  });
+
+  it("includes shell fallback output ambiguity guidance in review prompts", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-shell-fallback-");
+    await writeFixture(
+      root,
+      "scripts/check-status.sh",
+      [
+        "#!/usr/bin/env bash",
+        'status="$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo 000)"',
+        'echo "status=$status"',
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      ".github/workflows/status.yml",
+      [
+        "name: status",
+        "jobs:",
+        "  check:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - run: |",
+        '          some_command || echo "failed"',
+        "",
+      ].join("\n"),
+    );
+    const shellFeature = {
+      ...feature(),
+      title: "Shell/workflow config check-status.sh",
+      summary: "Shell or workflow automation with captured machine-readable output.",
+      kind: "config" as const,
+      source: "shell-workflow-heuristic",
+      ownedFiles: [{ path: "scripts/check-status.sh", reason: "shell workflow automation" }],
+      contextFiles: [
+        { path: ".github/workflows/status.yml", reason: "workflow run-block context" },
+      ],
+      tags: ["config", "shell", "workflow"],
+      trustBoundaries: ["process-exec", "network"] as FeatureRecord["trustBoundaries"],
+    };
+
+    const bundle = await buildReviewPromptBundle(
+      root,
+      project(root, ["shell", "yaml"]),
+      shellFeature,
+      defaultConfig(),
+    );
+
+    expect(bundle.prompt).toContain("Shell and workflow review:");
+    expect(bundle.prompt).toContain(
+      'status="$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo 000)"',
+    );
+    expect(bundle.prompt).toContain("404000");
+    expect(bundle.prompt).toContain('some_command || echo "failed"');
+    expect(bundle.prompt).toContain('if ! status="$(cmd)"; then status="fallback"; fi');
+    expect(bundle.prompt).toContain("--- scripts/check-status.sh (owned");
+    expect(bundle.prompt).toContain("--- .github/workflows/status.yml (context");
+  });
 });
 
-function project(root: string): ProjectRecord {
+describe("CUDA prompt guidance", () => {
+  it("includes CUDA review guidance for a feature that owns a .cu file", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-cuda-review-");
+    await writeFixture(root, "src/kernel.cu", "__global__ void k(void) {}\n");
+    const cudaFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [],
+      ownedFiles: [{ path: "src/kernel.cu", reason: "kernel" }],
+      contextFiles: [],
+    };
+    const bundle = await buildReviewPromptBundle(root, project(root), cudaFeature, defaultConfig());
+
+    expect(bundle.prompt).toContain("CUDA hazards");
+  });
+
+  it("omits CUDA review guidance for a non-CUDA feature", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-noncuda-review-");
+    await writeFixture(root, "src/index.ts", "export const value = 1;\n");
+    const tsFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [],
+      ownedFiles: [{ path: "src/index.ts", reason: "primary" }],
+      contextFiles: [],
+    };
+    const bundle = await buildReviewPromptBundle(root, project(root), tsFeature, defaultConfig());
+
+    expect(bundle.prompt).not.toContain("CUDA hazards");
+  });
+
+  it("omits CUDA review guidance in deslopify mode even for a CUDA feature", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-cuda-deslopify-");
+    await writeFixture(root, "src/kernel.cu", "__global__ void k(void) {}\n");
+    const cudaFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [],
+      ownedFiles: [{ path: "src/kernel.cu", reason: "kernel" }],
+      contextFiles: [],
+    };
+    const bundle = await buildReviewPromptBundle(
+      root,
+      project(root),
+      cudaFeature,
+      defaultConfig(),
+      "deslopify",
+    );
+
+    expect(bundle.prompt).not.toContain("CUDA hazards");
+  });
+
+  it("includes CUDA review guidance for a mixed feature whose entrypoint is C++ but owns a .cu file", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-cuda-mixed-");
+    await writeFixture(root, "src/main.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/kernel.cu", "__global__ void k(void) {}\n");
+    const mixedFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [{ path: "src/main.cpp", symbol: "main", route: null, command: null }],
+      ownedFiles: [
+        { path: "src/main.cpp", reason: "host" },
+        { path: "src/kernel.cu", reason: "kernel" },
+      ],
+      contextFiles: [],
+    };
+    const bundle = await buildReviewPromptBundle(
+      root,
+      project(root),
+      mixedFeature,
+      defaultConfig(),
+    );
+
+    expect(bundle.prompt).toContain("CUDA hazards");
+  });
+
+  it("includes CUDA guidance in the fix prompt for a CUDA feature", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-cuda-fix-");
+    await writeFixture(root, "src/kernel.cu", "__global__ void k(void) {}\n");
+    const cudaFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [],
+      ownedFiles: [{ path: "src/kernel.cu", reason: "kernel" }],
+      contextFiles: [],
+    };
+    const prompt = await buildFixPrompt(
+      root,
+      finding("src/kernel.cu"),
+      cudaFeature,
+      defaultConfig(),
+    );
+
+    expect(prompt).toContain("CUDA hazards");
+  });
+
+  it("omits CUDA guidance in the fix prompt for a non-CUDA feature", async () => {
+    const root = await fixtureRoot("clawpatch-prompt-noncuda-fix-");
+    await writeFixture(root, "src/index.ts", "export const value = 1;\n");
+    const tsFeature: FeatureRecord = {
+      ...feature(),
+      entrypoints: [],
+      ownedFiles: [{ path: "src/index.ts", reason: "primary" }],
+      contextFiles: [],
+    };
+    const prompt = await buildFixPrompt(root, finding("src/index.ts"), tsFeature, defaultConfig());
+
+    expect(prompt).not.toContain("CUDA hazards");
+  });
+});
+
+function project(root: string, languages: string[] = ["typescript"]): ProjectRecord {
   return {
     schemaVersion: 1,
     projectId: "proj_prompt",
@@ -208,7 +465,7 @@ function project(root: string): ProjectRecord {
       headSha: null,
     },
     detected: {
-      languages: ["typescript"],
+      languages,
       frameworks: [],
       packageManagers: ["npm"],
       commands: defaultConfig().commands,

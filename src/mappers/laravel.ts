@@ -8,13 +8,16 @@ import {
 } from "../detect.js";
 import { pathExists } from "../fs.js";
 import { TrustBoundary } from "../types.js";
-import { isSafeDirectory, isSafeFile, pathMatchesPrefix, shouldSkip, walk } from "./shared.js";
+import { chunkFiles } from "./grouping.js";
+import {
+  uniqueFileRefs,
+  isSafeDirectory,
+  isSafeFile,
+  pathMatchesPrefix,
+  shouldSkip,
+  walk,
+} from "./shared.js";
 import { FeatureSeed, SeedFileRef, SeedTestRef } from "./types.js";
-
-type SourceGroup = {
-  label: string;
-  files: string[];
-};
 
 type RouteRef = {
   file: string;
@@ -188,7 +191,7 @@ async function controllerSeeds(
         route: controllerRoutes[0]?.uri ?? null,
         command: null,
         ownedFiles: [{ path, reason: "controller" }],
-        contextFiles: uniqueRefs([
+        contextFiles: uniqueFileRefs([
           ...controllerRoutes.map((route) => ({ path: route.file, reason: "route definition" })),
           ...(await phpUseContextFiles(root, path, controllerByClass)),
           ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
@@ -246,7 +249,7 @@ async function commandSeeds(
         route: null,
         command: signature,
         ownedFiles: [{ path, reason: "Artisan command" }],
-        contextFiles: uniqueRefs([
+        contextFiles: uniqueFileRefs([
           ...(await phpUseContextFiles(root, path)),
           ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
         ]),
@@ -299,7 +302,7 @@ async function serviceSeeds(
         route: null,
         command: null,
         ownedFiles: [{ path, reason: "service" }],
-        contextFiles: uniqueRefs([
+        contextFiles: uniqueFileRefs([
           ...(await phpUseContextFiles(root, path)),
           ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
         ]),
@@ -358,7 +361,7 @@ async function phpClassSeeds(
         route: null,
         command: null,
         ownedFiles: [{ path, reason: titlePrefix.toLowerCase() }],
-        contextFiles: uniqueRefs([
+        contextFiles: uniqueFileRefs([
           ...(await phpUseContextFiles(root, path)),
           ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
         ]),
@@ -379,7 +382,7 @@ async function groupedPhpSeeds(
   tag: string,
 ): Promise<FeatureSeed[]> {
   const files = await phpFilesUnder(root, prefix);
-  const groups = partitionSourceFiles(prefix, files, groupedMaxOwnedFiles);
+  const groups = chunkFiles(prefix, files.toSorted(), groupedMaxOwnedFiles);
   return groups.map((group) => ({
     title: `${titlePrefix} ${group.label}`,
     summary: `${titlePrefix} in ${group.label}.`,
@@ -1067,7 +1070,7 @@ function testSuiteSeeds(
   projectType: "Laravel" | "PHP",
 ): FeatureSeed[] {
   return [...groupedTestFiles(testFiles).entries()].flatMap(([root, files]) =>
-    partitionSourceFiles(root, files, groupedMaxOwnedFiles).map((group) => ({
+    chunkFiles(root, files.toSorted(), groupedMaxOwnedFiles).map((group) => ({
       title: `${projectType} test suite ${group.label}`,
       summary: `${projectType} tests in ${group.label}.`,
       kind: "test-suite",
@@ -1143,43 +1146,12 @@ function laravelShouldSkip(path: string): boolean {
   return shouldSkip(path) || /(^|\/)(vendor|storage|bootstrap\/cache)(\/|$)/u.test(path);
 }
 
-function partitionSourceFiles(
-  sourceRoot: string,
-  files: string[],
-  maxFiles: number,
-): SourceGroup[] {
-  const sorted = files.toSorted();
-  const groups: SourceGroup[] = [];
-  for (let index = 0; index < sorted.length; index += maxFiles) {
-    const chunk = sorted.slice(index, index + maxFiles);
-    const part = Math.floor(index / maxFiles) + 1;
-    groups.push({
-      label: sorted.length <= maxFiles ? sourceRoot : `${sourceRoot}#${part}`,
-      files: chunk,
-    });
-  }
-  return groups;
-}
-
 async function existingRefs(root: string, refs: Array<[string, string]>): Promise<SeedFileRef[]> {
   const output: SeedFileRef[] = [];
   for (const [path, reason] of refs) {
     if (await pathExists(join(root, path))) {
       output.push({ path, reason });
     }
-  }
-  return output;
-}
-
-function uniqueRefs(refs: SeedFileRef[]): SeedFileRef[] {
-  const seen = new Set<string>();
-  const output: SeedFileRef[] = [];
-  for (const ref of refs) {
-    if (seen.has(ref.path)) {
-      continue;
-    }
-    seen.add(ref.path);
-    output.push(ref);
   }
   return output;
 }

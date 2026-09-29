@@ -96,6 +96,12 @@ export const reasoningEffortSchema = z.enum(reasoningEfforts);
 
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 
+const codexConfigValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+export const codexConfigSchema = z.record(z.string(), codexConfigValueSchema);
+
+export type CodexConfig = z.infer<typeof codexConfigSchema>;
+
 export const projectRecordSchema = z.object({
   schemaVersion: z.literal(1),
   projectId: z.string(),
@@ -128,6 +134,7 @@ export const configSchema = z.object({
     name: z.string(),
     model: z.string().nullable(),
     reasoningEffort: reasoningEffortSchema.nullable().optional().default(null),
+    codexConfig: codexConfigSchema.optional().default({}),
   }),
   commands: projectCommandsSchema,
   review: z.object({
@@ -141,6 +148,19 @@ export const configSchema = z.object({
     commit: z.boolean(),
     openPr: z.boolean(),
   }),
+  /**
+   * Post-validation registry verifier — drops review findings that claim
+   * a package version is unpublished when the npm registry says
+   * otherwise. Explicit opt-in because lookups send package coordinates
+   * to the public npm registry. Only `verified-published`
+   * outcomes drop a finding; 404, network errors, and unknown responses
+   * keep it). See `src/registry-verifier.ts` for the verdict matrix.
+   */
+  registryVerifier: z
+    .object({
+      enabled: z.boolean().default(false),
+    })
+    .default({ enabled: false }),
 });
 
 export type ClawpatchConfig = z.infer<typeof configSchema>;

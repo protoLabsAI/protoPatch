@@ -37,12 +37,26 @@ Current behavior:
 
 ## Flags
 
+### --feature-list <path>
+
+Review exactly the feature ids listed in the file, in file order. The file must
+contain one feature id per line. Blank lines are ignored and duplicate ids are
+de-duplicated by first occurrence.
+
+This mode is explicit feature selection, so it cannot be combined with
+`--feature`, `--project`, `--since`, or `--include-dirty`.
+
+```bash
+clawpatch review --feature-list /tmp/features.txt
+```
+
 ### --since <ref>
 
 Restrict review to features whose owned or context files have changed in
-`git diff --name-only --relative <ref>...HEAD`. Paths are compared relative to
-the selected project root, so `--root` may point at a subdirectory inside a
-larger Git repository. Useful for CI:
+`git diff --no-renames --name-only --relative <ref>...HEAD`. Committed renames
+include both the old and new paths, so features mapped to either path remain
+eligible. Paths are compared relative to the selected project root, so `--root`
+may point at a subdirectory inside a larger Git repository. Useful for CI:
 
 ```bash
 clawpatch review --since origin/main   # review what this branch changed
@@ -68,9 +82,11 @@ appends a compact summary to `GITHUB_STEP_SUMMARY` when that file is available.
 
 Progress uses stderr so `--json` stdout remains machine-readable. The worker
 pool is per-process, and lock files under `.clawpatch/locks/` prevent
-overlapping review processes from claiming the same feature. Interrupted runs
-can leave recoverable lock files; clear them with `clawpatch clean-locks` after
-confirming no review process is still active. `clawpatch status` includes both
+overlapping review processes from claiming the same feature. Interrupted local
+runs with dead process IDs are reclaimed automatically on the next claim. Use
+`clawpatch clean-locks --stale-only` for conservative cleanup that preserves live
+local locks and locks from other hosts; the unfiltered `clean-locks` command still
+requires confirming that no review process is active. `clawpatch status` includes both
 feature-record locks and lock files in `activeLocks`, and reports the lock-file
 count as `lockFiles`.
 
@@ -120,8 +136,64 @@ Categories requested from the provider:
 - `build-release`
 - `maintainability`
 
+## CUDA-aware review
+
+When a feature owns CUDA `.cu` or `.cuh` sources, `clawpatch review` in default
+mode and `clawpatch fix` add CUDA-specific guidance to the provider prompt:
+kernel data races and synchronization barriers, unchecked CUDA runtime calls and
+missing post-launch error checks, host versus device pointer confusion, unsafe
+global- and shared-memory access, stream and event synchronization, and
+device-memory leaks. Findings still use the existing categories; there is no
+CUDA-specific category. Deslopify mode is unaffected.
+
 Review does not edit files. Use `clawpatch fix --finding <id>` for the explicit
 patch loop.
+
+## Registry verifier
+
+After per-finding evidence validation, review can run an opt-in npm-registry
+verifier. Findings whose entire title and reasoning both state the same bounded
+`pkg@semver` publication claim such as `mongodb@7.0.0 is unpublished on npm`
+get resolved against
+`https://registry.npmjs.org/{name}/{version}`. When the registry confirms
+the version is published, the finding is partitioned into
+`droppedFindings` with `layer: "registry-verifier"` instead of being
+surfaced as a real finding.
+
+This addresses a recurring failure mode where providers backed by an LLM
+with a fixed knowledge cutoff confidently flag post-cutoff package
+versions as nonexistent. (See _We Have a Package for You!_ — Spracklen et
+al., USENIX Security 2025, [arXiv:2406.10279][slop-paper] — for measured
+hallucination rates of the symmetric failure: invented package names.
+The registry-grounded mitigation is the same.)
+
+The verifier is intentionally biased toward keeping findings:
+
+| Registry response                      | Verdict              | Action       |
+| -------------------------------------- | -------------------- | ------------ |
+| 200 with matching `name` AND `version` | `verified-published` | drop finding |
+| 404                                    | `verified-missing`   | keep finding |
+| 5xx, transport error, timeout          | `unknown`            | keep finding |
+| 200 with non-JSON content-type         | `unknown`            | keep finding |
+| 200 with mismatched body name/version  | `unknown`            | keep finding |
+| 200 with body > 1 MiB                  | `unknown`            | keep finding |
+| Any redirect (`redirect: "error"`)     | `unknown`            | keep finding |
+
+Failure of the verifier never creates a false negative — only refutable
+single-package claims drop. Compound, multi-package, or context-disagreeing findings are always kept. The verifier is
+disabled by default because it sends package
+coordinates to the public npm registry. Enable it explicitly with
+`registryVerifier.enabled = true` in `.clawpatch/config.json`; the
+`--no-registry-verify` flag can still disable it for a single run. Within a single review run it
+deduplicates registry calls per `(name, version)`.
+
+[slop-paper]: https://arxiv.org/abs/2406.10279
+
+For a Node frontend and Rust backend sharing one HTTP path namespace,
+`review --link-http frontend:backend` adds bounded, literal HTTP candidate context
+only for that review. Existing feature records and default review behavior are
+unchanged. See [Optional HTTP relations](feature-mapping.md#optional-http-relations)
+for the root-pair assertion, supported syntax, ambiguity rules, and limits.
 
 ## The merge gate (`ci/protopatch-gate.py`)
 
