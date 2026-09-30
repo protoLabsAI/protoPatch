@@ -12,7 +12,11 @@ upstream release the fork is built on. The fork's additions live in their own
 adapter files (`src/providers/gateway.ts`, `src/providers/proto.ts`) instead of
 inside the provider monolith, so upstream changes merge without conflict.
 
-## Unreleased (protoLabs fork)
+## 0.8.2 (protoLabs fork)
+
+Built on upstream's unreleased 0.8.2 tree (it already carries their committed-rename
+diff-selection and non-Git patch-audit fixes) plus the fork's lock fixes below. Upstream
+has not tagged 0.8.2 yet, so this number is the fork's own until it does.
 
 - **state**: a feature lock written on another host is reclaimed once it is older
   than `CLAWPATCH_LOCK_STALE_MS` (default 2 h). Upstream's stale-lock reclaim only
