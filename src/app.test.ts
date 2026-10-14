@@ -193,6 +193,33 @@ describe("runProviderReviewWithRetry", () => {
     });
     expect(result.findings).toEqual([]);
     expect(review).toHaveBeenCalledTimes(2);
+    expect(review.mock.calls[0]?.[2]?.sessionId).toBe(review.mock.calls[1]?.[2]?.sessionId);
+  });
+
+  it("scopes session affinity to the repository and feature across re-reviews", async () => {
+    const review = vi.fn().mockResolvedValue(emptyReview());
+    const provider = fakeProvider(review);
+    for (const [root, featureId] of [
+      ["/tmp/repo-a", "feat_x"],
+      ["/tmp/repo-a", "feat_x"],
+      ["/tmp/repo-b", "feat_x"],
+      ["/tmp/repo-a", "feat_y"],
+    ]) {
+      await runProviderReviewWithRetry({
+        provider,
+        root: root!,
+        prompt: "hi",
+        options: { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+        context: QUIET_CONTEXT,
+        featureId: featureId!,
+        index: 0,
+        total: 1,
+      });
+    }
+    const sessions = review.mock.calls.map((call) => call[2].sessionId);
+    expect(sessions[0]).toMatch(/^clawpatch:[a-f0-9]{64}$/);
+    expect(sessions[0]).toBe(sessions[1]);
+    expect(new Set(sessions).size).toBe(3);
   });
 
   it("acquires the RPM limiter before each retry attempt", async () => {

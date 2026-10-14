@@ -18,6 +18,10 @@ Built on upstream's unreleased 0.8.2 tree (it already carries their committed-re
 diff-selection and non-Git patch-audit fixes) plus the fork's lock fixes below. Upstream
 has not tagged 0.8.2 yet, so this number is the fork's own until it does.
 
+- **provider(gateway)**: review calls send `x-litellm-session-id`, scoped to the
+  resolved checkout root and feature ID, so LiteLLM session affinity keeps retries
+  and re-reviews on a warm replica. Moving the checkout starts a new session.
+
 - **state**: a feature lock written on another host is reclaimed once it is older
   than `CLAWPATCH_LOCK_STALE_MS` (default 2 h). Upstream's stale-lock reclaim only
   covers a dead pid on the _same_ host; in a container every recreate changes the

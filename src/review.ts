@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hostname, cpus } from "node:os";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -485,6 +486,11 @@ async function runProviderReviewWithRetry(args: {
   limiter?: RpmLimiter;
 }): Promise<ProviderReviewOutput> {
   const { provider, root, prompt, options, context, featureId, index, total, limiter } = args;
+  // Feature ids use relative paths and can match across repositories. Scope the
+  // session to this checkout; hashing also keeps paths out of HTTP headers.
+  const sessionId = `clawpatch:${createHash("sha256")
+    .update(JSON.stringify([resolve(root), featureId]))
+    .digest("hex")}`;
   const maxAttempts = 1 + reviewRetries();
   let lastError: unknown;
   // Every attempt shares the first one's start, so a provider's timeout bounds
@@ -494,7 +500,13 @@ async function runProviderReviewWithRetry(args: {
     try {
       await limiter?.acquire();
       callStartedAt ??= Date.now();
-      return await provider.review(root, prompt, { ...options, callStartedAt });
+      // The repository and feature are the session key: a retry, or a re-review of the same
+      // slice, then reaches the gateway replica that already cached its prompt.
+      return await provider.review(root, prompt, {
+        ...options,
+        callStartedAt,
+        sessionId,
+      });
     } catch (error: unknown) {
       // A retry cut off by the call's shared deadline has nothing new to say:
       // report the failure that prompted the retry — its own class and exit
