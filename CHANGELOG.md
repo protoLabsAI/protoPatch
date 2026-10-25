@@ -12,15 +12,20 @@ upstream release the fork is built on. The fork's additions live in their own
 adapter files (`src/providers/gateway.ts`, `src/providers/proto.ts`) instead of
 inside the provider monolith, so upstream changes merge without conflict.
 
+## 0.8.3 (protoLabs fork)
+
+- **provider(gateway)**: review calls send `x-litellm-session-id`, scoped to the
+  resolved checkout root and feature ID, so LiteLLM session affinity keeps retries
+  and re-reviews on a warm replica. Moving the checkout starts a new session.
+  This was committed after 0.8.2 was published (it was filed under the 0.8.2 heading), so
+  no released build sent the header; pr-reviewer-plugin#286 found 0 of ~1,030 `undici`
+  requests from the reviewer carrying a session id.
+
 ## 0.8.2 (protoLabs fork)
 
 Built on upstream's unreleased 0.8.2 tree (it already carries their committed-rename
 diff-selection and non-Git patch-audit fixes) plus the fork's lock fixes below. Upstream
 has not tagged 0.8.2 yet, so this number is the fork's own until it does.
-
-- **provider(gateway)**: review calls send `x-litellm-session-id`, scoped to the
-  resolved checkout root and feature ID, so LiteLLM session affinity keeps retries
-  and re-reviews on a warm replica. Moving the checkout starts a new session.
 
 - **state**: a feature lock written on another host is reclaimed once it is older
   than `CLAWPATCH_LOCK_STALE_MS` (default 2 h). Upstream's stale-lock reclaim only
